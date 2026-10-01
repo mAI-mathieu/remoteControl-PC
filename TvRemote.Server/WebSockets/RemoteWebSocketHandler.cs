@@ -1,13 +1,14 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text.Json;
+using System.Threading.Channels;
 using TvRemote.Configuration;
 using TvRemote.Models;
 using TvRemote.Services;
 
 namespace TvRemote.WebSockets;
 public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore store, CommandDispatcher dispatcher,
-    IAppLauncherService apps, ILogger<RemoteWebSocketHandler> logger)
+    IAppLauncherService apps, ITextFocusService focus, ILogger<RemoteWebSocketHandler> logger)
 {
     private readonly ConcurrentDictionary<string, (string Device, WebSocket Socket)> sessions = new();
     private readonly SemaphoreSlim slots = new(16);
@@ -33,6 +34,31 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
         if (!await slots.WaitAsync(0)) { context.Response.StatusCode = 429; return; }
         var sessionId = Guid.NewGuid().ToString("N");
         using var socket = await context.WebSockets.AcceptWebSocketAsync();
+        using var outgoingGate = new SemaphoreSlim(1);
+        using var sessionStop = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+        var updates = Channel.CreateBounded<TextFocusState>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
+        Action<TextFocusState> onFocus = state => updates.Writer.TryWrite(state);
+        var subscribed = false;
+        Task focusPump = Task.CompletedTask;
+        async Task Reply(object value)
+        {
+            await outgoingGate.WaitAsync(sessionStop.Token);
+            try { await Send(socket, value, sessionStop.Token); }
+            finally { outgoingGate.Release(); }
+        }
+        async Task PumpFocus()
+        {
+            try
+            {
+                await foreach (var state in updates.Reader.ReadAllAsync(sessionStop.Token))
+                {
+                    if (socket.State != WebSocketState.Open) break;
+                    await Reply(new { type = "input_focus", state });
+                }
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or InvalidOperationException)
+            { if (!sessionStop.IsCancellationRequested) socket.Abort(); }
+        }
         try
         {
             using var authTimeout = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
@@ -51,7 +77,9 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
             sessions[sessionId] = (device.Id, socket);
             lock (store.Current) { device.LastConnected = DateTimeOffset.UtcNow; store.Save(); }
             logger.LogInformation("Device {DeviceId} connected", device.Id);
-            await Send(socket, new { type = "ready", deviceName = store.Current.DeviceName, apps = apps.List() }, context.RequestAborted);
+            focus.Changed += onFocus; subscribed = true;
+            await Reply(new { type = "ready", deviceName = store.Current.DeviceName, apps = apps.List(), inputFocus = focus.Current });
+            focusPump = PumpFocus(); focus.RequestRefresh();
             var window = Environment.TickCount64; int count = 0, errors = 0, textCharacters = 0, launches = 0;
             while (socket.State == WebSocketState.Open)
             {
@@ -68,13 +96,14 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
                     if (command.Type == "text" && (textCharacters += command.Value!.Length) > 20_000) throw new FormatException("Text rate exceeded.");
                     if (command.Type is "app" or "power" or "playnite_close" && ++launches > 4) throw new FormatException("Action rate exceeded.");
                     dispatcher.Execute(sessionId, command);
-                    if (command.Type == "ping") await Send(socket, new { type = "pong" }, context.RequestAborted);
+                    if (command.Type is "mouse_click" or "mouse_up" or "app" || command.Type == "key" && command.Key is "TAB" or "ENTER" or "ESCAPE") focus.RequestRefresh();
+                    if (command.Type == "ping") await Reply(new { type = "pong", inputFocus = focus.Current });
                 }
                 catch (Exception ex) when (ex is FormatException or JsonException or InvalidOperationException or System.ComponentModel.Win32Exception)
                 {
                     // Never log command payloads: they may contain text or passwords.
                     logger.LogWarning("Remote command rejected ({Reason})", ex.GetType().Name);
-                    await Send(socket, new { type = "error", message = ex is JsonException ? "Malformed command." : ex.Message }, context.RequestAborted);
+                    await Reply(new { type = "error", message = ex is JsonException ? "Malformed command." : ex.Message });
                     if (++errors >= 5) break;
                 }
             }
@@ -84,6 +113,8 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
         catch (Exception ex) { logger.LogError("Remote session failed ({Reason})", ex.GetType().Name); }
         finally
         {
+            if (subscribed) focus.Changed -= onFocus;
+            updates.Writer.TryComplete(); sessionStop.Cancel(); await focusPump;
             dispatcher.Release(sessionId); sessions.TryRemove(sessionId, out _); slots.Release();
             if (socket.State == WebSocketState.Open) { try { using var timeout = new CancellationTokenSource(1000); await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Session ended", timeout.Token); } catch { socket.Abort(); } }
         }

@@ -1,1 +1,1 @@
-{"name":"tvremote-frontend-tests","private":true,"type":"module","scripts":{"test":"node --test TvRemote.Tests/trackpad.test.js"}}
+{"name":"tvremote-frontend-tests","private":true,"type":"module","scripts":{"test":"node --test TvRemote.Tests/*.test.js"}}

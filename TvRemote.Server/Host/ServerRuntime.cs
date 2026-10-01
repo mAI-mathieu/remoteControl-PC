@@ -36,10 +36,13 @@ public sealed class ServerRuntime(ConfigStore store, DiscoveryService discovery)
         builder.Services.AddSingleton<PairingService>();
         builder.Services.AddSingleton<IPairingService>(p => p.GetRequiredService<PairingService>());
         builder.Services.AddSingleton<IInputService, InputService>(); builder.Services.AddSingleton<IMouseService, MouseService>();
-        builder.Services.AddSingleton<IKeyboardService, KeyboardService>(); builder.Services.AddSingleton<IMediaService, MediaService>();
+        builder.Services.AddSingleton<IKeyboardService, KeyboardService>();
         builder.Services.AddSingleton<IVolumeService, VolumeService>(); builder.Services.AddSingleton<IAppLauncherService, AppLauncherService>();
         builder.Services.AddSingleton<IPowerService, PowerService>(); builder.Services.AddSingleton<CommandDispatcher>();
         builder.Services.AddSingleton<RemoteWebSocketHandler>();
+        builder.Services.AddSingleton<TextFocusService>();
+        builder.Services.AddSingleton<ITextFocusService>(p => p.GetRequiredService<TextFocusService>());
+        if (bindAddresses == null) builder.Services.AddHostedService(p => p.GetRequiredService<TextFocusService>());
         builder.Services.AddSingleton(discovery);
         builder.Services.AddSingleton<MdnsService>();
         if (bindAddresses == null) builder.Services.AddHostedService(p => p.GetRequiredService<MdnsService>());

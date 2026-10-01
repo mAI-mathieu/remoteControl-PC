@@ -13,7 +13,7 @@ using TvRemote.Models;
 using TvRemote.Services;
 using TvRemote.WebSockets;
 
-if (args.Contains("--preview")) { await Preview.Run(); return; }
+if (args.Contains("--preview")) { await Preview.Run(args.Contains("--native-focus")); return; }
 var passed = 0;
 void Check(bool condition, string name) { if (!condition) throw new Exception("FAIL: " + name); passed++; Console.WriteLine("PASS: " + name); }
 void Reject(string json) { try { CommandParser.Parse(Encoding.UTF8.GetBytes(json)); throw new Exception("Accepted invalid command: " + json); } catch (Exception e) when (e is FormatException or JsonException or InvalidOperationException) { passed++; } }
@@ -51,20 +51,27 @@ try
     AppLauncherService.Validate(new("test", "Test", "", "executable", @"C:\Program Files\Missing.exe")); passed++;
     Check(!new AppLauncherService(store, NullLogger<AppLauncherService>.Instance).List().Any(a => a.ToString()!.Contains("protectedToken")), "app list does not expose secrets");
     Check(DiscoveryService.IsLan(IPAddress.Parse("192.168.1.2")) && !DiscoveryService.IsLan(IPAddress.Parse("8.8.8.8")), "LAN address filtering");
+    var nativeFocusLifecycle = new TextFocusService(NullLogger<TextFocusService>.Instance);
+    await nativeFocusLifecycle.StartAsync(CancellationToken.None); await nativeFocusLifecycle.StopAsync(CancellationToken.None);
+    nativeFocusLifecycle.Dispose(); nativeFocusLifecycle.Dispose(); nativeFocusLifecycle.RequestRefresh();
+    Check(true, "native focus monitor shuts down safely through multiple DI registrations");
     var input = new FakeInput(); var keyboard = new KeyboardService(input);
     keyboard.Text("č🛋"); Check(input.Events.Count == 6 && input.Events.All(e => e.Unicode), "UTF-16 Unicode injection");
     input.Events.Clear(); keyboard.Press("C", ["CTRL"]); Check(input.Events.Select(e => (e.Key,e.Up)).SequenceEqual(new[] { ((ushort)17,false),((ushort)67,false),((ushort)67,true),((ushort)17,true) }), "shortcut modifiers released in order");
-    var mouse = new FakeMouse(); using var dispatcher = new CommandDispatcher(mouse, keyboard, new MediaService(input), new VolumeService(input), new FakeApps(), new FakePower());
+    var mouse = new FakeMouse(); using var dispatcher = new CommandDispatcher(mouse, keyboard, new VolumeService(input), new FakeApps(), new FakePower());
+    Reject("{\"type\":\"media\",\"action\":\"play_pause\"}");
     dispatcher.Execute("one", new("mouse_down", Button:"left"));
     try { dispatcher.Execute("two", new("mouse_move", Dx:1)); throw new Exception("Drag collision allowed"); } catch (InvalidOperationException) { passed++; }
     dispatcher.Release("two"); Check(mouse.Down, "another session cannot release drag"); dispatcher.Release("one"); Check(!mouse.Down, "disconnect releases drag");
     using (var listener = new TcpListener(IPAddress.Loopback, 0)) { listener.Start(); store.Current.ServerPort = ((IPEndPoint)listener.LocalEndpoint).Port; }
     if (store.Current.ServerPort == store.Current.HttpsPort) store.Current.HttpsPort++;
     await using var server = new ServerRuntime(store, new DiscoveryService());
-    await server.StartAsync([IPAddress.Loopback], services => { services.AddSingleton<IInputService>(input); services.AddSingleton<IPowerService>(new FakePower()); services.AddSingleton<IAppLauncherService>(new FakeApps()); });
+    var focus = new FakeTextFocus();
+    await server.StartAsync([IPAddress.Loopback], services => { services.AddSingleton<IInputService>(input); services.AddSingleton<IPowerService>(new FakePower()); services.AddSingleton<IAppLauncherService>(new FakeApps()); services.AddSingleton<ITextFocusService>(focus); });
     var origin = $"http://127.0.0.1:{store.Current.ServerPort}";
     using var http = new HttpClient();
-    Check((await http.GetAsync(origin + "/")).IsSuccessStatusCode, "mobile shell served");
+    var shell = await http.GetStringAsync(origin + "/");
+    Check(shell.Contains("data-volume=\"up\"") && !shell.Contains("view-media") && !shell.Contains("data-nav=\"keyboard\"><span>"), "simplified shell with main-page volume and contextual keyboard");
     var hostile = new HttpRequestMessage(HttpMethod.Post, origin + "/api/pair"); hostile.Headers.Add("Origin", "https://evil.example"); hostile.Content = new StringContent("{}", Encoding.UTF8, "application/json");
     Check((await http.SendAsync(hostile)).StatusCode == HttpStatusCode.Forbidden, "cross-origin pairing blocked");
     var rebound = new HttpRequestMessage(HttpMethod.Get, origin + "/"); rebound.Headers.Host = "evil.example";
@@ -87,7 +94,18 @@ try
     {
         var appJson = readyJson.RootElement.GetProperty("apps")[0];
         Check(appJson.GetProperty("id").GetString() == "test" && appJson.GetProperty("name").GetString() == "Test app", "camelCase app contract for browser");
+        Check(!readyJson.RootElement.GetProperty("inputFocus").GetProperty("editable").GetBoolean(), "initial input focus included in authenticated handshake");
     }
+    focus.Set(true, true);
+    using (var focusJson = JsonDocument.Parse(await WsReceive(ws)))
+    {
+        var state = focusJson.RootElement.GetProperty("state");
+        Check(focusJson.RootElement.GetProperty("type").GetString() == "input_focus" && state.GetProperty("editable").GetBoolean() && state.GetProperty("password").GetBoolean() && state.EnumerateObject().Count() == 3, "focus notifications contain capability metadata only");
+    }
+    focus.Set(false);
+    using (var focusJson = JsonDocument.Parse(await WsReceive(ws))) Check(!focusJson.RootElement.GetProperty("state").GetProperty("editable").GetBoolean(), "leaving editable focus is sent to the phone");
+    input.Events.Clear(); await WsSend(ws, new { type = "volume", action = "up" }); await WsSend(ws, new { type = "ping" });
+    Check((await WsReceive(ws)).Contains("pong") && input.Events.Select(e => (e.Key,e.Up)).SequenceEqual(new[] { ((ushort)0xAF,false),((ushort)0xAF,true) }), "main-page volume command reaches Windows volume key service");
     input.Events.Clear(); await WsSend(ws, new { type = "text", value = "Red Dead Redemption 2" }); await WsSend(ws, new { type = "ping" }); Check((await WsReceive(ws)).Contains("pong") && input.Events.Count == 42, "Unicode input reaches injected service through WebSocket");
     await WsSend(ws, new { type = "shell", command = "echo no" }); Check((await WsReceive(ws)).Contains("error"), "malformed command rejected on live socket");
     server.Pairing.Revoke(server.Pairing.Authenticate(token)!.Id);
@@ -98,7 +116,7 @@ try
     Check(certificates.Count == 2 && certificates.Count(c => c.HasPrivateKey) == 1, "root signing private key is discarded");
     foreach (var item in certificates) item.Dispose();
     var hostLog = File.ReadAllText(Path.Combine(temp,"host.log"));
-    Check(hostLog.Contains("Server started") && hostLog.Contains("Pairing attempt accepted") && !hostLog.Contains(token) && !hostLog.Contains("Red Dead Redemption 2"), "startup/pairing logging without tokens or typed text");
+    Check(hostLog.Contains("Server started") && hostLog.Contains("Pairing attempt accepted") && !hostLog.Contains(token) && !hostLog.Contains("Red Dead Redemption 2") && !hostLog.Contains("input_focus"), "startup/pairing logging without tokens, typed text or focus details");
     var mdnsPacket = MdnsService.BuildResponse([IPAddress.Parse("192.168.1.50")],8123);
     Check(mdnsPacket[2] == 0x84 && mdnsPacket[7] == 4 && Encoding.ASCII.GetString(mdnsPacket).Contains("tvpc"), "mDNS A/PTR/SRV/TXT response structure");
     var invalidConfig = Path.Combine(temp, "invalid"); Directory.CreateDirectory(invalidConfig); File.WriteAllText(Path.Combine(invalidConfig,"config.json"), "{\"serverPort\":80}");
@@ -119,3 +137,10 @@ sealed class FakeInput : IInputService
 sealed class FakeMouse : IMouseService { public bool Down; public void Move(int x,int y) { } public void Click(string button) { } public void Button(string button,bool down) => Down = down; public void Scroll(int v,int h) { } }
 sealed class FakeApps : IAppLauncherService { public object[] List() => [new { Id = "test", Name = "Test app", Icon = "folder", available = true }]; public void Launch(string id) { } public void ClosePlaynite() { } }
 sealed class FakePower : IPowerService { public void Execute(string action) { } }
+sealed class FakeTextFocus : ITextFocusService
+{
+    public TextFocusState Current { get; private set; } = new(false);
+    public event Action<TextFocusState>? Changed;
+    public void RequestRefresh() { }
+    public void Set(bool editable, bool password = false) { Current = new(editable, password, Current.Revision + 1); Changed?.Invoke(Current); }
+}

@@ -1,8 +1,19 @@
 import { TrackpadGestures } from './trackpad.js';
+import { FocusNavigation } from './focus-navigation.js';
 const $ = selector => document.querySelector(selector);
 let token = ''; try { token = localStorage.getItem('tvremote-token') || ''; } catch { }
 let socket, connected = false, retry = 0, reconnectTimer, heartbeat, lastPong = 0, toastTimer, composing = false;
 const modifiers = new Map();
+const focusNavigation = new FocusNavigation({
+  currentView: () => $('.view.active')?.id.replace('view-', ''),
+  interactionActive: () => gestures.points.size > 0 || gestures.dragging,
+  navigate: (name, options) => navigate(name, options),
+  showKeyboardHint: password => {
+    $('#keyboard-context').textContent = password ? 'Password field selected on your PC.' : 'Text field selected on your PC.';
+    $('#live-input').classList.toggle('private-input', password);
+    $('#live-input').setAttribute('aria-label', password ? 'Type into the selected password field' : 'Type into the selected text field');
+  }
+});
 const haptic = () => navigator.vibrate?.(8);
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 4000); }
 function status(text, ready = false) { $('#connection span').textContent = text; $('#connection').classList.toggle('connected', ready); }
@@ -31,8 +42,10 @@ function connect() {
       clearTimeout(authTimeout); connected = true; retry = 0; lastPong = Date.now(); status('Connected', true);
       $('#device-name').textContent = message.deviceName; renderApps(message.apps);
       if ($('#pair-dialog').open) $('#pair-dialog').close();
+      focusNavigation.reset(); focusNavigation.receive(message.inputFocus);
       heartbeat = setInterval(() => { if (Date.now() - lastPong > 30_000) current.close(); else send({ type: 'ping' }); }, 10_000);
-    } else if (message.type === 'pong') lastPong = Date.now();
+    } else if (message.type === 'input_focus') { if (!document.hidden) focusNavigation.receive(message.state); }
+    else if (message.type === 'pong') { lastPong = Date.now(); if (!document.hidden) focusNavigation.receive(message.inputFocus); }
     else if (message.type === 'error') toast(message.message);
   };
   current.onclose = event => {
@@ -66,9 +79,9 @@ trackpad.addEventListener('pointerdown', event => {
   gestures.down(event.pointerId, event.clientX, event.clientY); positionRing(event);
 });
 trackpad.addEventListener('pointermove', event => { gestures.move(event.pointerId, event.clientX, event.clientY); positionRing(event); });
-trackpad.addEventListener('pointerup', event => { gestures.up(event.pointerId); haptic(); });
-trackpad.addEventListener('pointercancel', event => gestures.up(event.pointerId, true));
-trackpad.addEventListener('lostpointercapture', event => gestures.up(event.pointerId, true));
+trackpad.addEventListener('pointerup', event => { gestures.up(event.pointerId); focusNavigation.flushPending(); haptic(); });
+trackpad.addEventListener('pointercancel', event => { gestures.up(event.pointerId, true); focusNavigation.flushPending(); });
+trackpad.addEventListener('lostpointercapture', event => { gestures.up(event.pointerId, true); focusNavigation.flushPending(); });
 trackpad.addEventListener('contextmenu', event => event.preventDefault());
 function positionRing(event) { const rect = trackpad.getBoundingClientRect(); $('#touch-ring').style.transform = `translate(${event.clientX - rect.left - 19}px,${event.clientY - rect.top - 19}px)`; }
 let frame;
@@ -77,14 +90,23 @@ animate();
 document.addEventListener('visibilitychange', () => {
   gestures.reset(); send({ type: 'release' });
   if (document.hidden) { cancelAnimationFrame(frame); frame = null; }
-  else { if (!frame) animate(); if (!connected) { socket?.close(); connect(); } }
+  else { if (!frame) animate(); if (!connected) { socket?.close(); connect(); } else send({ type: 'ping' }); }
 });
 window.addEventListener('pagehide', () => { gestures.reset(); send({ type: 'release' }); socket?.close(); });
 window.addEventListener('online', () => { if (!connected) connect(); });
-function navigate(name) {
+function openNativeKeyboard() {
+  const input = $('#text-panel').hidden ? $('#live-input') : $('#text-input');
+  input.focus({ preventScroll: true });
+  if ('virtualKeyboard' in navigator) {
+    try { navigator.virtualKeyboard.show(); } catch { }
+  }
+}
+function navigate(name, { automatic = false } = {}) {
+  if (!automatic) focusNavigation.manualNavigation();
   gestures.reset(); $('.view.active')?.classList.remove('active'); $(`#view-${name}`).classList.add('active');
-  document.querySelectorAll('nav button').forEach(button => button.classList.toggle('active', button.dataset.nav === name));
-  if (name === 'keyboard') ($('#text-panel').hidden ? $('#live-input') : $('#text-input')).focus();
+  document.querySelectorAll('nav button').forEach(button => button.classList.toggle('active', button.dataset.nav === (name === 'keyboard' ? 'remote' : name)));
+  if (name === 'keyboard') openNativeKeyboard();
+  else { if (document.activeElement instanceof HTMLTextAreaElement) document.activeElement.blur(); try { navigator.virtualKeyboard?.hide(); } catch { } }
   window.scrollTo(0, 0); haptic();
 }
 function consumeModifiers() { const active = [...modifiers.keys()]; for (const [name, state] of modifiers) if (state === 1) modifiers.delete(name); renderModifiers(); return active; }
@@ -99,7 +121,6 @@ document.addEventListener('click', async event => {
   if (data.key) key(data.key);
   if (data.shortcut) shortcut(data.shortcut);
   if (data.mod) { const state = modifiers.get(data.mod) || 0; if (state === 2) modifiers.delete(data.mod); else modifiers.set(data.mod, state + 1); renderModifiers(); haptic(); }
-  if (data.media) { send({ type: 'media', action: data.media }); haptic(); }
   if (data.volume) { send({ type: 'volume', action: data.volume }); haptic(); }
   if (data.app) { send({ type: 'app', id: data.app }); haptic(); }
   if (data.power) {

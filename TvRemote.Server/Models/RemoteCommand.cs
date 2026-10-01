@@ -37,7 +37,7 @@ public static class CommandParser
             "scroll" => ["type", "delta", "horizontal"],
             "key" => ["type", "key", "modifiers"],
             "text" => ["type", "value"],
-            "media" or "volume" => ["type", "action"],
+            "volume" => ["type", "action"],
             "app" => ["type", "id"],
             "playnite_close" or "ping" or "release" => ["type"],
             "power" => ["type", "action", "confirm"],
@@ -74,9 +74,9 @@ public static class CommandParser
                 }
                 return new(type, Value: text);
             case "app": return new(type, Id: String("id"));
-            case "media": case "volume":
+            case "volume":
                 var action = String("action");
-                if (!(type == "media" ? MediaService.Keys : VolumeService.Keys).ContainsKey(action)) throw new FormatException("Unsupported action.");
+                if (!VolumeService.Keys.ContainsKey(action)) throw new FormatException("Unsupported action.");
                 return new(type, Action: action);
             case "power":
                 var power = String("action");

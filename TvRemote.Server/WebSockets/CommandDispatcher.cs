@@ -2,7 +2,7 @@ using TvRemote.Models;
 using TvRemote.Services;
 
 namespace TvRemote.WebSockets;
-public sealed class CommandDispatcher(IMouseService mouse, IKeyboardService keyboard, IMediaService media,
+public sealed class CommandDispatcher(IMouseService mouse, IKeyboardService keyboard,
     IVolumeService volume, IAppLauncherService apps, IPowerService power) : IDisposable
 {
     private readonly object gate = new();
@@ -27,7 +27,6 @@ public sealed class CommandDispatcher(IMouseService mouse, IKeyboardService keyb
                 case "scroll": mouse.Scroll(command.Delta, command.Horizontal); break;
                 case "key": keyboard.Press(command.Key!, command.Modifiers!); break;
                 case "text": keyboard.Text(command.Value!); break;
-                case "media": media.Press(command.Action!); break;
                 case "volume": volume.Press(command.Action!); break;
                 case "app": apps.Launch(command.Id!); break;
                 case "playnite_close": apps.ClosePlaynite(); break;
