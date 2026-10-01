@@ -1,0 +1,164 @@
+import { TrackpadGestures } from './trackpad.js';
+const $ = selector => document.querySelector(selector);
+let token = ''; try { token = localStorage.getItem('tvremote-token') || ''; } catch { }
+let socket, connected = false, retry = 0, reconnectTimer, heartbeat, lastPong = 0, toastTimer, composing = false;
+const modifiers = new Map();
+const haptic = () => navigator.vibrate?.(8);
+function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 4000); }
+function status(text, ready = false) { $('#connection span').textContent = text; $('#connection').classList.toggle('connected', ready); }
+function send(command) {
+  if (!connected || socket?.readyState !== WebSocket.OPEN) { if (!['mouse_move','scroll','mouse_up','release'].includes(command.type)) toast('Reconnect to your PC to use the remote.'); return false; }
+  if (socket.bufferedAmount > 4096) { if (!['mouse_move','scroll'].includes(command.type)) { socket.close(); toast('Connection is busy. Reconnecting…'); } return false; }
+  socket.send(JSON.stringify(command)); return true;
+}
+function showPairing(message = '') {
+  connected = false; clearTimeout(reconnectTimer); clearInterval(heartbeat); status('Pair your phone');
+  $('#pair-error').textContent = message; if (!$('#pair-dialog').open) $('#pair-dialog').showModal();
+}
+function forgetToken() { token = ''; try { localStorage.removeItem('tvremote-token'); } catch { } }
+function connect() {
+  clearTimeout(reconnectTimer); clearInterval(heartbeat);
+  const previous = socket; socket = null; if (previous && previous.readyState < WebSocket.CLOSING) previous.close();
+  if (!token) { showPairing(); return; }
+  status(retry ? 'Reconnecting…' : 'Connecting…'); connected = false;
+  const current = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`); socket = current;
+  const authTimeout = setTimeout(() => current.close(), 7000);
+  current.onopen = () => current.send(JSON.stringify({ type: 'auth', token }));
+  current.onmessage = event => {
+    if (socket !== current) return;
+    let message; try { message = JSON.parse(event.data); } catch { current.close(); return; }
+    if (message.type === 'ready') {
+      clearTimeout(authTimeout); connected = true; retry = 0; lastPong = Date.now(); status('Connected', true);
+      $('#device-name').textContent = message.deviceName; renderApps(message.apps);
+      if ($('#pair-dialog').open) $('#pair-dialog').close();
+      heartbeat = setInterval(() => { if (Date.now() - lastPong > 30_000) current.close(); else send({ type: 'ping' }); }, 10_000);
+    } else if (message.type === 'pong') lastPong = Date.now();
+    else if (message.type === 'error') toast(message.message);
+  };
+  current.onclose = event => {
+    clearTimeout(authTimeout); if (socket !== current) return;
+    connected = false; clearInterval(heartbeat); gestures.reset();
+    if (event.code === 1008) { forgetToken(); showPairing('This phone needs to pair again. Generate a new code on your PC.'); return; }
+    if (!token) return;
+    status('Reconnecting…');
+    reconnectTimer = setTimeout(connect, Math.min(8000, 500 * 2 ** Math.min(retry++, 4)) + Math.random() * 250);
+  };
+  current.onerror = () => { if (socket === current) status('Reconnecting…'); };
+}
+$('#pair-dialog').addEventListener('cancel', event => event.preventDefault());
+$('#pair-form').addEventListener('submit', async event => {
+  event.preventDefault(); $('#pair-submit').disabled = true; $('#pair-error').textContent = '';
+  try {
+    const response = await fetch('/api/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: $('#pair-code').value, name: $('#phone-name').value.trim() }) });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.message || (response.status === 429 ? 'Too many attempts. Wait a minute, then generate a new code.' : 'Could not pair this phone.'));
+    token = result.token;
+    try { localStorage.setItem('tvremote-token', token); } catch { toast('Browser storage is unavailable. You will need to pair next time.'); }
+    $('#pair-code').value = ''; connect();
+  } catch (error) { $('#pair-error').textContent = error.message || 'PC is unreachable.'; }
+  finally { $('#pair-submit').disabled = false; }
+});
+const trackpad = $('#trackpad');
+const gestures = new TrackpadGestures(send, { state: (touching, dragging) => { trackpad.classList.toggle('touching', touching); trackpad.classList.toggle('dragging', dragging); } });
+trackpad.addEventListener('pointerdown', event => {
+  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  event.preventDefault(); trackpad.setPointerCapture(event.pointerId);
+  gestures.down(event.pointerId, event.clientX, event.clientY); positionRing(event);
+});
+trackpad.addEventListener('pointermove', event => { gestures.move(event.pointerId, event.clientX, event.clientY); positionRing(event); });
+trackpad.addEventListener('pointerup', event => { gestures.up(event.pointerId); haptic(); });
+trackpad.addEventListener('pointercancel', event => gestures.up(event.pointerId, true));
+trackpad.addEventListener('lostpointercapture', event => gestures.up(event.pointerId, true));
+trackpad.addEventListener('contextmenu', event => event.preventDefault());
+function positionRing(event) { const rect = trackpad.getBoundingClientRect(); $('#touch-ring').style.transform = `translate(${event.clientX - rect.left - 19}px,${event.clientY - rect.top - 19}px)`; }
+let frame;
+function animate() { gestures.flush(); frame = requestAnimationFrame(animate); }
+animate();
+document.addEventListener('visibilitychange', () => {
+  gestures.reset(); send({ type: 'release' });
+  if (document.hidden) { cancelAnimationFrame(frame); frame = null; }
+  else { if (!frame) animate(); if (!connected) { socket?.close(); connect(); } }
+});
+window.addEventListener('pagehide', () => { gestures.reset(); send({ type: 'release' }); socket?.close(); });
+window.addEventListener('online', () => { if (!connected) connect(); });
+function navigate(name) {
+  gestures.reset(); $('.view.active')?.classList.remove('active'); $(`#view-${name}`).classList.add('active');
+  document.querySelectorAll('nav button').forEach(button => button.classList.toggle('active', button.dataset.nav === name));
+  if (name === 'keyboard') ($('#text-panel').hidden ? $('#live-input') : $('#text-input')).focus();
+  window.scrollTo(0, 0); haptic();
+}
+function consumeModifiers() { const active = [...modifiers.keys()]; for (const [name, state] of modifiers) if (state === 1) modifiers.delete(name); renderModifiers(); return active; }
+function key(key, mods) { send({ type: 'key', key, modifiers: mods ?? consumeModifiers() }); haptic(); }
+function shortcut(value) { const parts = value.split('+'); key(parts.pop(), parts); }
+function renderModifiers() { document.querySelectorAll('[data-mod]').forEach(button => { const state = modifiers.get(button.dataset.mod); button.classList.toggle('once', state === 1); button.classList.toggle('locked', state === 2); button.setAttribute('aria-pressed', state ? 'true' : 'false'); }); }
+document.addEventListener('click', async event => {
+  const button = event.target.closest('button'); if (!button || button.disabled) return;
+  const data = button.dataset;
+  if (data.nav) navigate(data.nav);
+  if (data.click) { gestures.flush(); send({ type: 'mouse_click', button: data.click }); haptic(); }
+  if (data.key) key(data.key);
+  if (data.shortcut) shortcut(data.shortcut);
+  if (data.mod) { const state = modifiers.get(data.mod) || 0; if (state === 2) modifiers.delete(data.mod); else modifiers.set(data.mod, state + 1); renderModifiers(); haptic(); }
+  if (data.media) { send({ type: 'media', action: data.media }); haptic(); }
+  if (data.volume) { send({ type: 'volume', action: data.volume }); haptic(); }
+  if (data.app) { send({ type: 'app', id: data.app }); haptic(); }
+  if (data.power) {
+    const action = data.power;
+    if (await confirm(`${action[0].toUpperCase() + action.slice(1)} ${$('#device-name').textContent}?`, action === 'sleep' ? 'The remote will reconnect when you wake the PC. It cannot wake a sleeping PC.' : 'This action affects the Windows session.', action)) send({ type: 'power', action, confirm: true });
+  }
+});
+async function confirm(title, description, label = 'Confirm') {
+  const dialog = $('#confirm-dialog'); $('#confirm-title').textContent = title; $('#confirm-description').textContent = description; $('#confirm-button').textContent = label[0].toUpperCase() + label.slice(1); dialog.returnValue = ''; dialog.showModal();
+  return new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), { once: true }));
+}
+const specialKeys = [['ESCAPE','Esc'],['TAB','Tab'],['BACKSPACE','⌫'],['DELETE','Delete'],['HOME','Home'],['UP','↑'],['END','End'],['PAGEUP','Pg Up'],['LEFT','←'],['DOWN','↓'],['RIGHT','→'],['PAGEDOWN','Pg Dn'],['ENTER','Enter'],['SPACE','Space']];
+for (const [name, label] of specialKeys) { const button = document.createElement('button'); button.dataset.key = name; button.textContent = label; $('#special-keys').append(button); }
+for (const [value, label] of [['CTRL+C','Copy'],['CTRL+V','Paste'],['CTRL+X','Cut'],['CTRL+A','Select all'],['CTRL+Z','Undo'],['CTRL+Y','Redo'],['ALT+TAB','Switch app'],['ALT+F4','Close app'],['WIN+D','Desktop'],['WIN+E','Files'],['WIN+R','Run'],['WIN+TAB','Task view'],['CTRL+SHIFT+ESCAPE','Task manager']]) {
+  const button = document.createElement('button'); button.dataset.shortcut = value; button.textContent = label; $('#shortcuts').append(button);
+}
+const live = $('#live-input');
+const sentinel = '\u200B';
+function resetLive() { live.value = sentinel; live.setSelectionRange(1, 1); }
+function typeText(value) {
+  if (!value) return;
+  if (modifiers.size) {
+    if (/^[a-z0-9]$/i.test(value)) key(value.toUpperCase());
+    else { toast('Use the special keys or shortcuts with modifiers.'); consumeModifiers(); }
+  } else send({ type: 'text', value });
+}
+live.addEventListener('focus', resetLive);
+live.addEventListener('compositionstart', () => composing = true);
+live.addEventListener('compositionend', () => { composing = false; typeText(live.value.replaceAll(sentinel, '')); resetLive(); });
+live.addEventListener('beforeinput', event => {
+  if (composing || event.isComposing) return;
+  if (event.inputType.startsWith('delete')) { event.preventDefault(); key(event.inputType.includes('Forward') ? 'DELETE' : 'BACKSPACE'); resetLive(); }
+  if (event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph') { event.preventDefault(); key('ENTER'); resetLive(); }
+});
+live.addEventListener('input', event => { if (!composing && !event.isComposing) { typeText(live.value.replaceAll(sentinel, '')); resetLive(); } });
+live.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); key('ENTER'); } });
+$('#live-mode').onclick = () => { $('#text-panel').hidden = true; $('#live-panel').hidden = false; $('#live-mode').classList.add('selected'); $('#text-mode').classList.remove('selected'); live.focus(); };
+$('#text-mode').onclick = () => { $('#text-panel').hidden = false; $('#live-panel').hidden = true; $('#text-mode').classList.add('selected'); $('#live-mode').classList.remove('selected'); $('#text-input').focus(); };
+$('#send-text').onclick = () => { const value = $('#text-input').value; if (value && send({ type: 'text', value })) { $('#text-input').value = ''; toast('Sent to your PC.'); haptic(); } };
+const icons = { gamepad:'▣',film:'▻',music:'♫',play:'▶',globe:'◎',folder:'▤' };
+function renderApps(apps) {
+  $('#apps-list').replaceChildren();
+  for (const app of apps) {
+    const button = document.createElement('button'); button.dataset.app = app.id; button.disabled = !app.available;
+    const icon = document.createElement('span'); icon.className = 'app-icon'; icon.textContent = icons[app.icon] || '▦';
+    const label = document.createElement('span'); label.textContent = app.name; button.append(icon, label);
+    if (!app.available) { const caption = document.createElement('small'); caption.textContent = 'Not installed'; button.append(caption); }
+    $('#apps-list').append(button);
+  }
+  $('#playnite-panel').hidden = !apps.some(app => app.id === 'playnite' && app.available);
+}
+$('#close-playnite').onclick = async () => { if (await confirm('Close Playnite?', 'Playnite will receive a normal close request.', 'Close')) send({ type: 'playnite_close' }); };
+$('#forget-device').onclick = async () => { if (await confirm('Forget this phone?', 'To revoke access permanently, also remove this device in the PC tray app.', 'Forget')) { forgetToken(); socket?.close(); showPairing(); } };
+function sensitivity(value) { if (!['0.5','0.75','1','1.25','1.5','2'].includes(value)) value = '1'; gestures.sensitivity = Number(value); $('#sensitivity').value = value; $('#sensitivity-button').textContent = `${Number(value).toFixed(2).replace(/0$/, '')}× sensitivity`; try { localStorage.setItem('tvremote-sensitivity', value); } catch { } }
+$('#sensitivity').onchange = event => sensitivity(event.target.value);
+try { sensitivity(localStorage.getItem('tvremote-sensitivity') || '1'); } catch { sensitivity('1'); }
+$('#sensitivity-button').onclick = () => { navigate('system'); $('#sensitivity').focus(); };
+$('#connection').onclick = () => { if (!connected && token) { socket?.close(); connect(); } else toast(connected ? 'Connected directly to your Windows PC.' : 'Open TV Remote on your PC to see a pairing code.'); };
+$('#pair-security').textContent = location.protocol === 'https:' ? 'Encrypted local connection. Your pairing stays on this phone.' : 'HTTP is unencrypted. Enable local HTTPS in the PC tray app for protected input and full PWA installation.';
+$('#install-hint').textContent = isSecureContext ? 'Install from your browser menu: Add to Home Screen or Install app.' : 'For full home-screen installation, enable HTTPS on your PC and trust its local certificate on this phone.';
+if ('serviceWorker' in navigator && isSecureContext) navigator.serviceWorker.register('/service-worker.js').catch(() => toast('Home-screen cache could not be enabled. The remote still works online.'));
+connect();
