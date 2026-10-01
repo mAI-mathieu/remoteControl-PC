@@ -67,7 +67,7 @@ public sealed class ServerRuntime(ConfigStore store, DiscoveryService discovery)
                 if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri) || uri.Authority != context.Request.Host.Value || uri.Scheme != context.Request.Scheme)
                 { context.Response.StatusCode = 403; return; }
             }
-            context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+            context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
             context.Response.Headers["X-Content-Type-Options"] = "nosniff";
             context.Response.Headers["Referrer-Policy"] = "no-referrer";
             context.Response.Headers.CacheControl = "no-store";
@@ -93,6 +93,13 @@ public sealed class ServerRuntime(ConfigStore store, DiscoveryService discovery)
             catch (System.Text.Json.JsonException) { return Results.BadRequest(new { message = "Invalid pairing request." }); }
         }).RequireRateLimiting("pair");
         server.Map("/ws", Handler.Handle);
+        server.MapPost("/api/app-icon/{id}", (string id, HttpContext context, IAppLauncherService apps) =>
+        {
+            var authorization = context.Request.Headers.Authorization.ToString();
+            if (!authorization.StartsWith("Bearer ", StringComparison.Ordinal) || Pairing.Authenticate(authorization[7..]) == null) return Results.Unauthorized();
+            var png = apps.GetIcon(id);
+            return png == null ? Results.NotFound() : Results.File(png, "image/png");
+        });
         server.MapGet("/TV-Remote-Root.cer", () => File.Exists(Path.Combine(store.DirectoryPath, "TV-Remote-Root.cer"))
             ? Results.File(Path.Combine(store.DirectoryPath, "TV-Remote-Root.cer"), "application/x-x509-ca-cert", "TV-Remote-Root.cer") : Results.NotFound());
         server.UseDefaultFiles(); server.UseStaticFiles();

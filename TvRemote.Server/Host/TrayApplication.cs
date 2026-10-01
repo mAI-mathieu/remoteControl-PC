@@ -11,6 +11,7 @@ public sealed class TrayApplication : ApplicationContext
     private readonly ConfigStore store;
     private readonly DiscoveryService discovery;
     private readonly ServerRuntime server;
+    private readonly Icon appIcon = BrandIcon.Load();
     private readonly NotifyIcon tray;
     private readonly Form window;
     private readonly Label status = new() { AutoSize = true, MaximumSize = new(630, 0) };
@@ -28,10 +29,12 @@ public sealed class TrayApplication : ApplicationContext
     {
         this.store = store; discovery = new(); server = new(store, discovery);
         window = new() { Text = "TV Remote", Size = new(700, 720), MinimumSize = new(700, 720), StartPosition = FormStartPosition.CenterScreen, Font = new("Segoe UI", 10) };
+        window.Icon = appIcon;
         var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Padding = new(20) };
         window.Controls.Add(layout);
         layout.Controls.Add(new Label { Text = "TV Remote", Font = new("Segoe UI", 22, FontStyle.Bold), AutoSize = true });
         layout.Controls.Add(status); layout.Controls.Add(qr); layout.Controls.Add(code);
+        layout.Controls.Add(Button("Manage apps…", ManageApps));
         newCode = Button("Generate new pairing code", () => { server.Pairing.GenerateCode(); RefreshStatus(); }); layout.Controls.Add(newCode);
         layout.Controls.Add(new Label { Text = "Paired phones — select a device to revoke", AutoSize = true });
         devices.Columns.Add("Device", 240); devices.Columns.Add("Status", 100); devices.Columns.Add("Last connected", 260);
@@ -53,10 +56,11 @@ public sealed class TrayApplication : ApplicationContext
         layout.Controls.Add(new Label { Text = "Allow TV Remote on Private networks in Windows Firewall. No router port forwarding is needed.\nHTTPS installation and phone testing instructions are in README.md.", AutoSize = true, MaximumSize = new(630, 0), Padding = new(0, 10, 0, 0) });
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open TV Remote", null, (_, _) => Show());
+        menu.Items.Add("Manage apps…", null, (_, _) => ManageApps());
         menu.Items.Add("Generate pairing code", null, (_, _) => { if (newCode.Enabled) { server.Pairing.GenerateCode(); Show(); } });
         menu.Items.Add("Restart server", null, (_, _) => _ = RestartAsync(true));
         menu.Items.Add("Quit", null, (_, _) => _ = QuitAsync());
-        tray = new() { Text = "TV Remote — starting", Icon = SystemIcons.Application, Visible = true, ContextMenuStrip = menu };
+        tray = new() { Text = "TV Remote — starting", Icon = appIcon, Visible = true, ContextMenuStrip = menu };
         tray.DoubleClick += (_, _) => Show();
         window.FormClosing += (_, e) => { if (!quitting) { e.Cancel = true; window.Hide(); } };
         timer.Tick += (_, _) => RefreshStatus(); timer.Start();
@@ -71,6 +75,11 @@ public sealed class TrayApplication : ApplicationContext
         button.Click += (_, _) => action(); return button;
     }
     private void Show() { RefreshStatus(); window.Show(); window.WindowState = FormWindowState.Normal; window.Activate(); }
+    private void ManageApps()
+    {
+        using var manager = new AppManagerForm(store);
+        if (manager.ShowDialog(window) == DialogResult.OK) server.Handler?.NotifyAppsChanged();
+    }
     private async Task RestartAsync(bool reload)
     {
         restart.Enabled = newCode.Enabled = false; status.Text = "Starting…";
@@ -155,6 +164,6 @@ public sealed class TrayApplication : ApplicationContext
     {
         quitting = true; timer.Stop(); tray.Visible = false;
         NetworkChange.NetworkAddressChanged -= NetworkChanged; networkTimer.Dispose();
-        await server.DisposeAsync(); qr.Image?.Dispose(); window.Close(); tray.Dispose(); timer.Dispose(); ExitThread();
+        await server.DisposeAsync(); qr.Image?.Dispose(); window.Close(); tray.Dispose(); appIcon.Dispose(); timer.Dispose(); ExitThread();
     }
 }

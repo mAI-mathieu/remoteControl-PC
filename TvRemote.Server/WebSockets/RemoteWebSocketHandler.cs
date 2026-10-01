@@ -12,6 +12,8 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
 {
     private readonly ConcurrentDictionary<string, (string Device, WebSocket Socket)> sessions = new();
     private readonly SemaphoreSlim slots = new(16);
+    private event Action? AppsChanged;
+    public void NotifyAppsChanged() => AppsChanged?.Invoke();
     public string[] ConnectedDeviceIds => sessions.Values.Select(s => s.Device).Distinct().ToArray();
     public void Disconnect(string id) { foreach (var session in sessions.Where(s => s.Value.Device == id)) { dispatcher.Release(session.Key); session.Value.Socket.Abort(); } }
     private static Task Send(WebSocket socket, object value, CancellationToken ct) => socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(value, JsonSerializerOptions.Web), WebSocketMessageType.Text, true, ct);
@@ -38,8 +40,11 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
         using var sessionStop = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
         var updates = Channel.CreateBounded<TextFocusState>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
         Action<TextFocusState> onFocus = state => updates.Writer.TryWrite(state);
+        var appUpdates = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
+        Action onApps = () => appUpdates.Writer.TryWrite(true);
         var subscribed = false;
         Task focusPump = Task.CompletedTask;
+        Task appPump = Task.CompletedTask;
         async Task Reply(object value)
         {
             await outgoingGate.WaitAsync(sessionStop.Token);
@@ -54,6 +59,19 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
                 {
                     if (socket.State != WebSocketState.Open) break;
                     await Reply(new { type = "input_focus", state });
+                }
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or InvalidOperationException)
+            { if (!sessionStop.IsCancellationRequested) socket.Abort(); }
+        }
+        async Task PumpApps()
+        {
+            try
+            {
+                await foreach (var _ in appUpdates.Reader.ReadAllAsync(sessionStop.Token))
+                {
+                    if (socket.State != WebSocketState.Open) break;
+                    await Reply(new { type = "apps_changed", apps = apps.List() });
                 }
             }
             catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or InvalidOperationException)
@@ -77,9 +95,9 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
             sessions[sessionId] = (device.Id, socket);
             lock (store.Current) { device.LastConnected = DateTimeOffset.UtcNow; store.Save(); }
             logger.LogInformation("Device {DeviceId} connected", device.Id);
-            focus.Changed += onFocus; subscribed = true;
+            focus.Changed += onFocus; AppsChanged += onApps; subscribed = true;
             await Reply(new { type = "ready", deviceName = store.Current.DeviceName, apps = apps.List(), inputFocus = focus.Current });
-            focusPump = PumpFocus(); focus.RequestRefresh();
+            focusPump = PumpFocus(); appPump = PumpApps(); focus.RequestRefresh();
             var window = Environment.TickCount64; int count = 0, errors = 0, textCharacters = 0, launches = 0;
             while (socket.State == WebSocketState.Open)
             {
@@ -113,8 +131,8 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
         catch (Exception ex) { logger.LogError("Remote session failed ({Reason})", ex.GetType().Name); }
         finally
         {
-            if (subscribed) focus.Changed -= onFocus;
-            updates.Writer.TryComplete(); sessionStop.Cancel(); await focusPump;
+            if (subscribed) { focus.Changed -= onFocus; AppsChanged -= onApps; }
+            updates.Writer.TryComplete(); appUpdates.Writer.TryComplete(); sessionStop.Cancel(); await Task.WhenAll(focusPump, appPump);
             dispatcher.Release(sessionId); sessions.TryRemove(sessionId, out _); slots.Release();
             if (socket.State == WebSocketState.Open) { try { using var timeout = new CancellationTokenSource(1000); await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Session ended", timeout.Token); } catch { socket.Abort(); } }
         }

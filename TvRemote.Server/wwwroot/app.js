@@ -45,6 +45,7 @@ function connect() {
       focusNavigation.reset(); focusNavigation.receive(message.inputFocus);
       heartbeat = setInterval(() => { if (Date.now() - lastPong > 30_000) current.close(); else send({ type: 'ping' }); }, 10_000);
     } else if (message.type === 'input_focus') { if (!document.hidden) focusNavigation.receive(message.state); }
+    else if (message.type === 'apps_changed') renderApps(message.apps);
     else if (message.type === 'pong') { lastPong = Date.now(); if (!document.hidden) focusNavigation.receive(message.inputFocus); }
     else if (message.type === 'error') toast(message.message);
   };
@@ -161,7 +162,27 @@ $('#live-mode').onclick = () => { $('#text-panel').hidden = true; $('#live-panel
 $('#text-mode').onclick = () => { $('#text-panel').hidden = false; $('#live-panel').hidden = true; $('#text-mode').classList.add('selected'); $('#live-mode').classList.remove('selected'); $('#text-input').focus(); };
 $('#send-text').onclick = () => { const value = $('#text-input').value; if (value && send({ type: 'text', value })) { $('#text-input').value = ''; toast('Sent to your PC.'); haptic(); } };
 const icons = { gamepad:'▣',film:'▻',music:'♫',play:'▶',globe:'◎',folder:'▤' };
+let appIconRequests, appIconUrls = [];
+function clearAppIcons() {
+  appIconRequests?.abort(); appIconRequests = null;
+  for (const url of appIconUrls) URL.revokeObjectURL(url);
+  appIconUrls = [];
+}
+async function loadProgramIcon(app, icon, signal) {
+  try {
+    const response = await fetch(`/api/app-icon/${encodeURIComponent(app.id)}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}` }, signal, cache: 'no-store'
+    });
+    if (!response.ok || !response.headers.get('content-type')?.startsWith('image/png')) return;
+    const blob = await response.blob(); if (signal.aborted || !icon.isConnected) return;
+    const url = URL.createObjectURL(blob); appIconUrls.push(url);
+    const image = document.createElement('img'); image.src = url; image.alt = ''; image.width = image.height = 32;
+    image.addEventListener('error', () => { if (icon.isConnected) icon.textContent = icons[app.icon] || '▦'; }, { once: true });
+    icon.replaceChildren(image);
+  } catch { /* Keep the fallback icon if this program disappears or the PC reconnects. */ }
+}
 function renderApps(apps) {
+  clearAppIcons(); appIconRequests = new AbortController();
   $('#apps-list').replaceChildren();
   for (const app of apps) {
     const button = document.createElement('button'); button.dataset.app = app.id; button.disabled = !app.available;
@@ -169,11 +190,12 @@ function renderApps(apps) {
     const label = document.createElement('span'); label.textContent = app.name; button.append(icon, label);
     if (!app.available) { const caption = document.createElement('small'); caption.textContent = 'Not installed'; button.append(caption); }
     $('#apps-list').append(button);
+    if (app.hasProgramIcon) loadProgramIcon(app, icon, appIconRequests.signal);
   }
   $('#playnite-panel').hidden = !apps.some(app => app.id === 'playnite' && app.available);
 }
 $('#close-playnite').onclick = async () => { if (await confirm('Close Playnite?', 'Playnite will receive a normal close request.', 'Close')) send({ type: 'playnite_close' }); };
-$('#forget-device').onclick = async () => { if (await confirm('Forget this phone?', 'To revoke access permanently, also remove this device in the PC tray app.', 'Forget')) { forgetToken(); socket?.close(); showPairing(); } };
+$('#forget-device').onclick = async () => { if (await confirm('Forget this phone?', 'To revoke access permanently, also remove this device in the PC tray app.', 'Forget')) { clearAppIcons(); forgetToken(); socket?.close(); showPairing(); } };
 function sensitivity(value) { if (!['0.5','0.75','1','1.25','1.5','2'].includes(value)) value = '1'; gestures.sensitivity = Number(value); $('#sensitivity').value = value; $('#sensitivity-button').textContent = `${Number(value).toFixed(2).replace(/0$/, '')}× sensitivity`; try { localStorage.setItem('tvremote-sensitivity', value); } catch { } }
 $('#sensitivity').onchange = event => sensitivity(event.target.value);
 try { sensitivity(localStorage.getItem('tvremote-sensitivity') || '1'); } catch { sensitivity('1'); }

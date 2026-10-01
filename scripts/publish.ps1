@@ -8,6 +8,7 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $output
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\install-user.ps1') -Destination $outputPath
 Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\firewall.ps1') -Destination $outputPath
 Copy-Item -LiteralPath (Join-Path $projectRoot 'THIRD-PARTY-NOTICES.md') -Destination $outputPath
+Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE-TWEMOJI-GRAPHICS.txt') -Destination $outputPath
 $archivePath = Join-Path $projectRoot "artifacts\TV-Remote-$Runtime.zip"
 Compress-Archive -Path (Join-Path $outputPath '*') -DestinationPath $archivePath -Force
 Write-Host "Ready: $outputPath\TvRemote.Server.exe"

@@ -7,10 +7,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <RootNamespace>TvRemote</RootNamespace>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
   <ItemGroup><Content Update="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" /></ItemGroup>
+  <ItemGroup><EmbeddedResource Include="app.ico" LogicalName="TvRemote.app.ico" /></ItemGroup>
   <ItemGroup><PackageReference Include="QRCoder" Version="1.8.0" /></ItemGroup>
 </Project>

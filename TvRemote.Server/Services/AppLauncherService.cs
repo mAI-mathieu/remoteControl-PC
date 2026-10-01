@@ -2,7 +2,7 @@ using System.Diagnostics;
 using TvRemote.Configuration;
 
 namespace TvRemote.Services;
-public interface IAppLauncherService { object[] List(); void Launch(string id); void ClosePlaynite(); }
+public interface IAppLauncherService { object[] List(); void Launch(string id); void ClosePlaynite(); byte[]? GetIcon(string id) => null; }
 public sealed class AppLauncherService(IConfigStore store, ILogger<AppLauncherService> logger) : IAppLauncherService
 {
     public static void Validate(AppShortcut app)
@@ -17,7 +17,7 @@ public sealed class AppLauncherService(IConfigStore store, ILogger<AppLauncherSe
         else if (app.Type != "executable" || string.IsNullOrWhiteSpace(app.Path) || !Path.IsPathFullyQualified(app.Path) || app.Path.StartsWith(@"\\") || !string.Equals(Path.GetExtension(app.Path), ".exe", StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"Shortcut {app.Id}: use a local absolute .exe path.");
     }
-    private string? Resolve(AppShortcut app)
+    public static string? Resolve(AppShortcut app)
     {
         if (app.Type == "url") return app.Url;
         if (File.Exists(app.Path)) return app.Path;
@@ -25,18 +25,29 @@ public sealed class AppLauncherService(IConfigStore store, ILogger<AppLauncherSe
             return new[] { Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Playnite", "Playnite.FullscreenApp.exe"), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Playnite", "Playnite.FullscreenApp.exe") }.FirstOrDefault(File.Exists);
         return null;
     }
-    public object[] List() => store.Current.AppShortcuts.Select(a => (object)new { a.Id, a.Name, a.Icon, available = Resolve(a) != null }).ToArray();
+    public object[] List()
+    {
+        AppShortcut[] shortcuts; lock (store.Current) shortcuts = store.Current.AppShortcuts.ToArray();
+        return shortcuts.Select(a => (object)new { a.Id, a.Name, a.Icon, available = Resolve(a) != null, hasProgramIcon = a.Type == "executable" && ProgramIcons.GetPng(Resolve(a)) != null }).ToArray();
+    }
+    public byte[]? GetIcon(string id)
+    {
+        AppShortcut? app; lock (store.Current) app = store.Current.AppShortcuts.FirstOrDefault(a => a.Id == id);
+        return app?.Type == "executable" ? ProgramIcons.GetPng(Resolve(app)) : null;
+    }
     public void Launch(string id)
     {
-        var app = store.Current.AppShortcuts.FirstOrDefault(a => a.Id == id) ?? throw new InvalidOperationException("Unknown shortcut.");
+        AppShortcut app;
+        lock (store.Current) app = store.Current.AppShortcuts.FirstOrDefault(a => a.Id == id) ?? throw new InvalidOperationException("Unknown shortcut.");
         Validate(app);
-        var target = Resolve(app) ?? throw new InvalidOperationException($"{app.Name} is not installed. Edit its path in the host configuration.");
+        var target = Resolve(app) ?? throw new InvalidOperationException($"{app.Name} is not installed. Choose Manage apps on the PC to update its program file.");
         Process.Start(new ProcessStartInfo(target) { UseShellExecute = true, WorkingDirectory = app.Type == "executable" ? Path.GetDirectoryName(target) : "" });
         logger.LogInformation("Launched shortcut {Id}", id);
     }
     public void ClosePlaynite()
     {
-        var app = store.Current.AppShortcuts.FirstOrDefault(a => a.Id == "playnite") ?? throw new InvalidOperationException("Playnite is not configured.");
+        AppShortcut app;
+        lock (store.Current) app = store.Current.AppShortcuts.FirstOrDefault(a => a.Id == "playnite") ?? throw new InvalidOperationException("Playnite is not configured.");
         var path = Resolve(app) ?? throw new InvalidOperationException("Playnite is not installed.");
         foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(path)))
         {

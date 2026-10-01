@@ -13,6 +13,7 @@ $shortcutShell = New-Object -ComObject WScript.Shell
 $shortcut = $shortcutShell.CreateShortcut((Join-Path $shortcutDirectory 'TV Remote.lnk'))
 $shortcut.TargetPath = Join-Path $destination 'TvRemote.Server.exe'
 $shortcut.WorkingDirectory = $destination
+$shortcut.IconLocation = (Join-Path $destination 'TvRemote.Server.exe') + ',0'
 $shortcut.Save()
 Start-Process -FilePath (Join-Path $destination 'TvRemote.Server.exe') -WindowStyle Hidden
 Write-Host "Installed in $destination. Enable Start with Windows in the tray app if desired."

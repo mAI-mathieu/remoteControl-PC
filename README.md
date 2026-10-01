@@ -56,6 +56,12 @@ Development: use `dotnet watch --project TvRemote.Server run`; edit HTML/CSS/JS 
 
 ## Configuration and shortcuts
 
+Choose **Manage apps…** in the PC window or tray menu. **Add program…** searches installed programs from the Start menu and Windows App Paths; filter by name, or choose **Browse files…** for a portable program. Local `.exe` files and ordinary `.lnk` shortcuts targeting them are supported. Shortcuts with arguments, scripts, Microsoft Store launch commands or nonlocal targets need a supported local executable instead. Detection reads metadata and never launches a program.
+
+Use **Add website…** for a web address (HTTPS is added when omitted). Name the shortcut; programs automatically use their actual Windows icon in the PC manager, program picker and phone Apps page. Website shortcuts use a selectable fallback symbol. Select a row to edit, remove, or move it up/down to set its phone order; missing program files are marked in the list. **Save changes** persists the list and updates connected phones immediately. **Cancel** discards the pending changes. Existing phone pairing, ports and other settings are preserved. Removing a shortcut does not uninstall its program.
+
+Program icons are extracted locally from the configured executable and cached in memory. The phone loads their PNG images through an authenticated same-origin request; executable paths and bearer tokens are not included in image URLs. Missing icons keep the fallback symbol. No online icon service is used.
+
 Configuration is created at `%APPDATA%\TvRemote\config.json`. Edit it through the host's **Open configuration** button, save and use **Restart server / reload configuration**. Invalid configuration produces a visible error and is preserved. Quit the host before replacing paired-device data or editing the file extensively, since successful connections persist last-connected timestamps.
 
 ```json

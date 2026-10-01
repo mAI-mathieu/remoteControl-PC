@@ -6,6 +6,26 @@ using TvRemote.Services;
 
 static class Preview
 {
+    public static void RunAppManager()
+    {
+        var worker = new Thread(() =>
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "TvRemote-app-manager-preview-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.SystemAware);
+                System.Windows.Forms.Application.EnableVisualStyles();
+                System.Windows.Forms.Application.SetCompatibleTextRenderingDefault(false);
+                var store = new ConfigStore(directory);
+                Console.WriteLine("App manager preview uses disposable settings. No input or apps are launched.");
+                using var manager = new AppManagerForm(store);
+                manager.ShowInTaskbar = true;
+                System.Windows.Forms.Application.Run(manager);
+            }
+            finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+        });
+        worker.SetApartmentState(ApartmentState.STA); worker.Start(); worker.Join();
+    }
     public static async Task Run(bool nativeFocus = false)
     {
         var directory = Path.Combine(Path.GetTempPath(), "TvRemote-preview-" + Guid.NewGuid().ToString("N"));
@@ -40,7 +60,12 @@ static class Preview
     }
     private sealed class PreviewApps : IAppLauncherService
     {
-        public object[] List() => RemoteConfig.Defaults().Select(a => (object)new { a.Id,a.Name,a.Icon,available = a.Id != "kodi" }).ToArray();
+        public object[] List() => RemoteConfig.Defaults().Select(a => (object)new { a.Id,a.Name,a.Icon,available = a.Id != "kodi", hasProgramIcon = a.Type == "executable" && ProgramIcons.GetPng(AppLauncherService.Resolve(a)) != null }).ToArray();
+        public byte[]? GetIcon(string id)
+        {
+            var app = RemoteConfig.Defaults().FirstOrDefault(a => a.Id == id);
+            return app?.Type == "executable" ? ProgramIcons.GetPng(AppLauncherService.Resolve(app)) : null;
+        }
         public void Launch(string id) { }
         public void ClosePlaynite() { }
     }

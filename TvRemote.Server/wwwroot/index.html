@@ -8,7 +8,7 @@
 </head>
 <body>
   <div class="remote-shell">
-    <header><div class="brand"><span class="brand-mark">⌁</span><div><span class="eyebrow">YOUR SOFA. YOUR CONTROL.</span><h1 id="device-name">Living Room PC</h1></div></div><button class="connection" id="connection" aria-label="Connection status"><i></i><span>Connecting</span></button></header>
+    <header><div class="brand"><span class="brand-mark"><img src="/trackball.svg" alt="" width="32" height="32"></span><div><span class="eyebrow">YOUR SOFA. YOUR CONTROL.</span><h1 id="device-name">Living Room PC</h1></div></div><button class="connection" id="connection" aria-label="Connection status"><i></i><span>Connecting</span></button></header>
     <main>
       <section id="view-remote" class="view active" aria-label="Trackpad">
         <div class="section-heading"><h2>Remote</h2><button id="sensitivity-button" class="subtle">1.0× sensitivity</button></div>
@@ -47,7 +47,7 @@
     </main>
     <nav aria-label="Remote controls"><button data-nav="remote" class="active"><span>↖</span>Remote</button><button data-nav="apps"><span>▦</span>Apps</button><button data-nav="system"><span>⏻</span>System</button></nav>
   </div>
-  <dialog id="pair-dialog"><form id="pair-form"><div class="dialog-symbol">⌁</div><span class="eyebrow">LET'S GET COMFORTABLE</span><h2>Meet your new remote.</h2><p>Enter the six-digit code shown in TV Remote on your PC.</p><label for="phone-name">This phone's name</label><input id="phone-name" maxlength="60" value="My phone" required autocomplete="off"><label for="pair-code">Pairing code</label><input id="pair-code" class="code-input" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" minlength="6" placeholder="000000" autocomplete="one-time-code" required><p id="pair-error" class="error" role="alert"></p><button class="primary full" id="pair-submit">Connect to PC ↗</button><p class="hint" id="pair-security"></p></form></dialog>
+  <dialog id="pair-dialog"><form id="pair-form"><div class="dialog-symbol"><img src="/trackball.svg" alt="" width="48" height="48"></div><span class="eyebrow">LET'S GET COMFORTABLE</span><h2>Meet your new remote.</h2><p>Enter the six-digit code shown in TV Remote on your PC.</p><label for="phone-name">This phone's name</label><input id="phone-name" maxlength="60" value="My phone" required autocomplete="off"><label for="pair-code">Pairing code</label><input id="pair-code" class="code-input" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" minlength="6" placeholder="000000" autocomplete="one-time-code" required><p id="pair-error" class="error" role="alert"></p><button class="primary full" id="pair-submit">Connect to PC ↗</button><p class="hint" id="pair-security"></p></form></dialog>
   <dialog id="confirm-dialog"><form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-description"></p><div class="click-row"><button value="cancel">Cancel</button><button value="confirm" class="primary" id="confirm-button">Confirm</button></div></form></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script type="module" src="/app.js"></script>

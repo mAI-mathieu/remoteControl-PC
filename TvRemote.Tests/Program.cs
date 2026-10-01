@@ -14,6 +14,7 @@ using TvRemote.Services;
 using TvRemote.WebSockets;
 
 if (args.Contains("--preview")) { await Preview.Run(args.Contains("--native-focus")); return; }
+if (args.Contains("--manage-apps-preview")) { Preview.RunAppManager(); return; }
 var passed = 0;
 void Check(bool condition, string name) { if (!condition) throw new Exception("FAIL: " + name); passed++; Console.WriteLine("PASS: " + name); }
 void Reject(string json) { try { CommandParser.Parse(Encoding.UTF8.GetBytes(json)); throw new Exception("Accepted invalid command: " + json); } catch (Exception e) when (e is FormatException or JsonException or InvalidOperationException) { passed++; } }
@@ -44,6 +45,43 @@ try
     var tokens = new HashSet<string>();
     for (var i = 0; i < 20; i++) { code = pairing.GenerateCode(); tokens.Add(pairing.Pair(code.Code, "phone")!); }
     Check(tokens.Count == 20, "unique random tokens");
+    var website = ShortcutManagement.Create(" TV guide ", "globe", "url", " example.com ");
+    Check(website.Name == "TV guide" && website.Url == "https://example.com", "website manager trims names and adds HTTPS");
+    var editedWebsite = ShortcutManagement.Create("Edited guide", "film", "url", "https://example.com/tv", website.Id);
+    Check(editedWebsite.Id == website.Id && editedWebsite.Url!.EndsWith("/tv"), "editing keeps shortcut identity");
+    var program = ShortcutManagement.Create("Explorer", "folder", "executable", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe"));
+    var programPng = ProgramIcons.GetPng(program.Path);
+    Check(programPng != null && programPng.AsSpan().StartsWith(new byte[] { 137,80,78,71,13,10,26,10 }), "actual Windows executable icon is extracted as PNG");
+    Check(ReferenceEquals(programPng, ProgramIcons.GetPng(program.Path)) && ProgramIcons.GetPng(@"\\server\share\app.exe") == null && ProgramIcons.GetPng("https://example.com") == null, "program icons are cached locally and reject nonlocal sources");
+    var devicesBefore = store.Current.PairedDevices.Count;
+    ShortcutManagement.Save(store, [program, editedWebsite]);
+    var savedApps = new ConfigStore(temp).Current;
+    Check(savedApps.AppShortcuts.Select(a => a.Id).SequenceEqual(new[] { program.Id, website.Id }) && savedApps.PairedDevices.Count == devicesBefore && savedApps.ServerPort == store.Current.ServerPort, "saving app order preserves phones and server settings");
+    ShortcutManagement.Save(store, [editedWebsite]);
+    Check(new ConfigStore(temp).Current.AppShortcuts.Count == 1 && InstalledAppDiscovery.IsLocalProgram(program.Path), "removing a shortcut preserves its program file");
+    try { ShortcutManagement.Save(store, [website, editedWebsite]); throw new Exception("Duplicate shortcuts accepted"); } catch (InvalidDataException) { passed++; }
+    try { ShortcutManagement.Create("Script", "folder", "executable", @"C:\test.bat"); throw new Exception("Script accepted"); } catch (InvalidDataException) { passed++; }
+    var failingStore = new FailingConfigStore(); var originalApps = failingStore.Current.AppShortcuts;
+    try { ShortcutManagement.Save(failingStore, [website]); throw new Exception("Save unexpectedly succeeded"); } catch (IOException) { }
+    Check(ReferenceEquals(failingStore.Current.AppShortcuts, originalApps), "failed app save restores the previous list");
+    var detectedApps = await InstalledAppDiscovery.FindAsync();
+    Check(detectedApps.All(a => InstalledAppDiscovery.IsLocalProgram(a.Path)) && detectedApps.Select(a => a.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() == detectedApps.Length, "installed app discovery returns unique local programs without launching them");
+    Exception? dialogError = null;
+    var dialogThread = new Thread(() =>
+    {
+        try
+        {
+            using var addWebsite = new ShortcutEditorForm(website, true);
+            using var addProgram = new ShortcutEditorForm(program, true);
+            using var editProgram = new ShortcutEditorForm(program, false);
+            using var manager = new AppManagerForm(store);
+            using var picker = new InstalledAppPickerForm();
+        }
+        catch (Exception ex) { dialogError = ex; }
+    });
+    dialogThread.SetApartmentState(ApartmentState.STA); dialogThread.Start(); dialogThread.Join();
+    if (dialogError != null) throw new Exception("App manager dialog initialization failed", dialogError);
+    Check(true, "PC manager, program picker and all shortcut editor dialogs initialize safely");
     foreach (var shortcut in new[] { new AppShortcut("bad", "Bad", "", "url", Url:"file:///C:/Windows"), new AppShortcut("bad", "Bad", "", "executable", "cmd.exe"), new AppShortcut("bad", "Bad", "", "executable", @"\\server\share\bad.exe"), new AppShortcut("bad", "Bad", "", "executable", @"C:\script.bat"), new AppShortcut("bad", "Bad", "", "url", Url:"javascript:alert(1)") })
     {
         try { AppLauncherService.Validate(shortcut); throw new Exception("Accepted unsafe shortcut"); } catch (InvalidDataException) { passed++; }
@@ -67,7 +105,8 @@ try
     if (store.Current.ServerPort == store.Current.HttpsPort) store.Current.HttpsPort++;
     await using var server = new ServerRuntime(store, new DiscoveryService());
     var focus = new FakeTextFocus();
-    await server.StartAsync([IPAddress.Loopback], services => { services.AddSingleton<IInputService>(input); services.AddSingleton<IPowerService>(new FakePower()); services.AddSingleton<IAppLauncherService>(new FakeApps()); services.AddSingleton<ITextFocusService>(focus); });
+    var socketApps = new FakeApps();
+    await server.StartAsync([IPAddress.Loopback], services => { services.AddSingleton<IInputService>(input); services.AddSingleton<IPowerService>(new FakePower()); services.AddSingleton<IAppLauncherService>(socketApps); services.AddSingleton<ITextFocusService>(focus); });
     var origin = $"http://127.0.0.1:{store.Current.ServerPort}";
     using var http = new HttpClient();
     var shell = await http.GetStringAsync(origin + "/");
@@ -76,6 +115,8 @@ try
     Check((await http.SendAsync(hostile)).StatusCode == HttpStatusCode.Forbidden, "cross-origin pairing blocked");
     var rebound = new HttpRequestMessage(HttpMethod.Get, origin + "/"); rebound.Headers.Host = "evil.example";
     Check((await http.SendAsync(rebound)).StatusCode == HttpStatusCode.Forbidden, "DNS rebinding host blocked");
+    var anonymousIcon = new HttpRequestMessage(HttpMethod.Post, origin + "/api/app-icon/test"); anonymousIcon.Headers.Add("Origin", origin);
+    Check((await http.SendAsync(anonymousIcon)).StatusCode == HttpStatusCode.Unauthorized, "program icons require a paired phone token");
     using (var unauth = new ClientWebSocket())
     {
         unauth.Options.SetRequestHeader("Origin", origin); await unauth.ConnectAsync(new Uri(origin.Replace("http", "ws") + "/ws"), CancellationToken.None);
@@ -87,6 +128,11 @@ try
     var pairRequest = new HttpRequestMessage(HttpMethod.Post, origin + "/api/pair"); pairRequest.Headers.Add("Origin", origin); pairRequest.Content = new StringContent(JsonSerializer.Serialize(new { code = code.Code, name = "Socket phone" }), Encoding.UTF8, "application/json");
     var pairResponse = await http.SendAsync(pairRequest); using var pairJson = JsonDocument.Parse(await pairResponse.Content.ReadAsStringAsync()); token = pairJson.RootElement.GetProperty("token").GetString()!;
     Check(pairResponse.IsSuccessStatusCode, "HTTP pairing exchange");
+    var iconRequest = new HttpRequestMessage(HttpMethod.Post, origin + "/api/app-icon/test"); iconRequest.Headers.Add("Origin", origin); iconRequest.Headers.Authorization = new("Bearer", token);
+    var iconResponse = await http.SendAsync(iconRequest);
+    Check(iconResponse.IsSuccessStatusCode && iconResponse.Content.Headers.ContentType?.MediaType == "image/png" && (await iconResponse.Content.ReadAsByteArrayAsync()).SequenceEqual(programPng!), "paired phone loads the actual program icon without a token or executable path in the URL");
+    var missingIcon = new HttpRequestMessage(HttpMethod.Post, origin + "/api/app-icon/missing"); missingIcon.Headers.Add("Origin", origin); missingIcon.Headers.Authorization = new("Bearer", token);
+    Check((await http.SendAsync(missingIcon)).StatusCode == HttpStatusCode.NotFound, "unknown program icons return not found");
     using var ws = new ClientWebSocket(); ws.Options.SetRequestHeader("Origin", origin); await ws.ConnectAsync(new Uri(origin.Replace("http", "ws") + "/ws"), CancellationToken.None);
     await WsSend(ws, new { type = "auth", token });
     var readyMessage = await WsReceive(ws); Check(readyMessage.Contains("ready"), "authenticated WebSocket ready");
@@ -96,6 +142,10 @@ try
         Check(appJson.GetProperty("id").GetString() == "test" && appJson.GetProperty("name").GetString() == "Test app", "camelCase app contract for browser");
         Check(!readyJson.RootElement.GetProperty("inputFocus").GetProperty("editable").GetBoolean(), "initial input focus included in authenticated handshake");
     }
+    socketApps.Apps = [new { id = "updated", name = "Edited from PC", icon = "globe", available = true }];
+    server.Handler!.NotifyAppsChanged();
+    using (var appsJson = JsonDocument.Parse(await WsReceive(ws)))
+        Check(appsJson.RootElement.GetProperty("type").GetString() == "apps_changed" && appsJson.RootElement.GetProperty("apps")[0].GetProperty("name").GetString() == "Edited from PC", "PC app updates reach connected phones without restarting the server");
     focus.Set(true, true);
     using (var focusJson = JsonDocument.Parse(await WsReceive(ws)))
     {
@@ -109,6 +159,8 @@ try
     input.Events.Clear(); await WsSend(ws, new { type = "text", value = "Red Dead Redemption 2" }); await WsSend(ws, new { type = "ping" }); Check((await WsReceive(ws)).Contains("pong") && input.Events.Count == 42, "Unicode input reaches injected service through WebSocket");
     await WsSend(ws, new { type = "shell", command = "echo no" }); Check((await WsReceive(ws)).Contains("error"), "malformed command rejected on live socket");
     server.Pairing.Revoke(server.Pairing.Authenticate(token)!.Id);
+    var revokedIcon = new HttpRequestMessage(HttpMethod.Post, origin + "/api/app-icon/test"); revokedIcon.Headers.Add("Origin", origin); revokedIcon.Headers.Authorization = new("Bearer", token);
+    Check((await http.SendAsync(revokedIcon)).StatusCode == HttpStatusCode.Unauthorized, "revoked phones lose program icon access");
     try { await WsSend(ws, new { type = "ping" }); await WsReceive(ws); throw new Exception("Revoked socket survived"); } catch (Exception ex) when (ex is WebSocketException or OperationCanceledException) { passed++; Console.WriteLine("PASS: revocation terminates live WebSocket"); }
     var cert = new LocalCertificateService(store, new DiscoveryService()); cert.Generate(); using var certificate = cert.Load();
     Check(certificate.HasPrivateKey && File.Exists(cert.RootPath) && !File.ReadAllBytes(cert.PfxPath).AsSpan().StartsWith(new byte[] { 0x30, 0x82 }), "local HTTPS certificate with DPAPI protected private key");
@@ -135,7 +187,8 @@ sealed class FakeInput : IInputService
     public void Mouse(int dx,int dy,uint flags,int data = 0) { }
 }
 sealed class FakeMouse : IMouseService { public bool Down; public void Move(int x,int y) { } public void Click(string button) { } public void Button(string button,bool down) => Down = down; public void Scroll(int v,int h) { } }
-sealed class FakeApps : IAppLauncherService { public object[] List() => [new { Id = "test", Name = "Test app", Icon = "folder", available = true }]; public void Launch(string id) { } public void ClosePlaynite() { } }
+sealed class FakeApps : IAppLauncherService { public object[] Apps = [new { Id = "test", Name = "Test app", Icon = "folder", available = true, hasProgramIcon = true }]; public object[] List() => Apps; public void Launch(string id) { } public void ClosePlaynite() { } public byte[]? GetIcon(string id) => id == "test" ? ProgramIcons.GetPng(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe")) : null; }
+sealed class FailingConfigStore : IConfigStore { public RemoteConfig Current { get; } = new(); public void Save() => throw new IOException("Simulated write failure"); }
 sealed class FakePower : IPowerService { public void Execute(string action) { } }
 sealed class FakeTextFocus : ITextFocusService
 {

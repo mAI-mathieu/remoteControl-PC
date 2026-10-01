@@ -1,5 +1,11 @@
 # Third-party software
 
+The trackball emoji artwork (U+1F5B2) is from Twemoji. Copyright Twitter, Inc. and other contributors. Graphics are licensed under Creative Commons Attribution 4.0 International (CC BY 4.0). The app icon adds a dark background, padding and size variants. Full license: LICENSE-TWEMOJI-GRAPHICS.txt.
+
+Artwork source: https://github.com/jdecked/twemoji/blob/main/assets/svg/1f5b2.svg
+
+License: https://creativecommons.org/licenses/by/4.0/
+
 QRCoder 1.8.0 is used solely for local QR generation. It is distributed under the MIT license.
 
 Copyright (c) 2013-2025 Raffael Herrmann. Copyright (c) 2024-2025 Shane Krueger.
