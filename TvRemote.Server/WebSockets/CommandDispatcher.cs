@@ -3,7 +3,7 @@ using TvRemote.Services;
 
 namespace TvRemote.WebSockets;
 public sealed class CommandDispatcher(IMouseService mouse, IKeyboardService keyboard,
-    IVolumeService volume, IAppLauncherService apps, IPowerService power) : IDisposable
+    IVolumeService volume, IAppLauncherService apps, IPowerService power, TvRemote.Configuration.IConfigStore? store = null) : IDisposable
 {
     private readonly object gate = new();
     private string? owner;
@@ -13,6 +13,8 @@ public sealed class CommandDispatcher(IMouseService mouse, IKeyboardService keyb
     {
         lock (gate)
         {
+            if (store?.LoginOnly == true && !TvRemote.Host.PreLoginService.Allowed(command))
+                throw new InvalidOperationException("Windows sign-in supports only typing, navigation keys and the trackpad.");
             if (owner != null && owner != session && command.Type.StartsWith("mouse_")) throw new InvalidOperationException("Another remote is dragging.");
             switch (command.Type)
             {
@@ -27,6 +29,7 @@ public sealed class CommandDispatcher(IMouseService mouse, IKeyboardService keyb
                 case "scroll": mouse.Scroll(command.Delta, command.Horizontal); break;
                 case "key": keyboard.Press(command.Key!, command.Modifiers!); break;
                 case "text": keyboard.Text(command.Value!); break;
+                case "text_edit": keyboard.Edit(command.Before, command.Remove, command.Value!, command.After); break;
                 case "volume": volume.Press(command.Action!); break;
                 case "app": apps.Launch(command.Id!); break;
                 case "playnite_close": apps.ClosePlaynite(); break;

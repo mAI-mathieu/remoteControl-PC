@@ -8,6 +8,20 @@ public static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        // SYSTEM workers never initialize WinForms or display error dialogs on protected desktops.
+        if (args.Contains("--sign-in-service")) { PreLoginService.Run(); return; }
+        if (args is ["--sign-in-helper", var pipe]) { SignInInput.RunHelper(pipe); return; }
+        if (args is ["--install-sign-in", var packet, var sid])
+        {
+            try { PreLoginSetup.Install(packet, sid); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "Windows sign-in setup failed"); }
+            return;
+        }
+        if (args is ["--remove-sign-in"])
+        {
+            try { PreLoginSetup.Remove(); } catch (Exception ex) { MessageBox.Show(ex.Message, "Windows sign-in removal failed"); }
+            return;
+        }
         using var singleton = new Mutex(true, @"Local\TvRemote-" + Environment.UserName, out var first);
         if (!first) { MessageBox.Show("TV Remote is already running. Open it from the system tray.", "TV Remote"); return; }
         try

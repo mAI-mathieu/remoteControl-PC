@@ -3,7 +3,8 @@ using TvRemote.Services;
 
 namespace TvRemote.Models;
 public sealed record RemoteCommand(string Type, int Dx = 0, int Dy = 0, string? Button = null, int Delta = 0, int Horizontal = 0,
-    string? Key = null, string[]? Modifiers = null, string? Value = null, string? Action = null, string? Id = null, bool Confirm = false);
+    string? Key = null, string[]? Modifiers = null, string? Value = null, string? Action = null, string? Id = null, bool Confirm = false,
+    int Before = 0, int Remove = 0, int After = 0);
 
 public static class CommandParser
 {
@@ -37,6 +38,7 @@ public static class CommandParser
             "scroll" => ["type", "delta", "horizontal"],
             "key" => ["type", "key", "modifiers"],
             "text" => ["type", "value"],
+            "text_edit" => ["type", "before", "remove", "value", "after"],
             "volume" => ["type", "action"],
             "app" => ["type", "id"],
             "playnite_close" or "ping" or "release" => ["type"],
@@ -64,15 +66,18 @@ public static class CommandParser
                 }
                 if (key == "DELETE" && mods.Contains("CTRL") && mods.Contains("ALT")) throw new FormatException("Secure attention sequence is unsupported.");
                 return new(type, Key: key, Modifiers: mods);
-            case "text":
+            case "text": case "text_edit":
                 var text = String("value", 10_000);
-                if (text.Length == 0 || text.Any(c => char.IsControl(c) && c is not ('\n' or '\r' or '\t'))) throw new FormatException("Invalid text.");
+                if (type == "text" && text.Length == 0 || text.Any(c => char.IsControl(c) && c is not ('\n' or '\r' or '\t'))) throw new FormatException("Invalid text.");
                 for (var i = 0; i < text.Length; i++)
                 {
                     if (char.IsHighSurrogate(text[i])) { if (++i >= text.Length || !char.IsLowSurrogate(text[i])) throw new FormatException("Invalid Unicode."); }
                     else if (char.IsLowSurrogate(text[i])) throw new FormatException("Invalid Unicode.");
                 }
-                return new(type, Value: text);
+                if (type == "text") return new(type, Value: text);
+                var before = Number("before", 10_000); var remove = Number("remove", 10_000); var after = Number("after", 10_000);
+                if (remove < 0 || Math.Abs(before) + remove + text.Length + Math.Abs(after) is 0 or > 10_000) throw new FormatException("Invalid edit size.");
+                return new(type, Value: text, Before: before, Remove: remove, After: after);
             case "app": return new(type, Id: String("id"));
             case "volume":
                 var action = String("action");

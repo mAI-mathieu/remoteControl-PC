@@ -1,15 +1,17 @@
 import { TrackpadGestures } from './trackpad.js';
 import { FocusNavigation } from './focus-navigation.js';
+import { LiveTyping } from './live-typing.js';
 const $ = selector => document.querySelector(selector);
 let token = ''; try { token = localStorage.getItem('tvremote-token') || ''; } catch { }
-let socket, connected = false, retry = 0, reconnectTimer, heartbeat, lastPong = 0, toastTimer, composing = false;
+let socket, connected = false, retry = 0, reconnectTimer, heartbeat, lastPong = 0, toastTimer, composing = false, loginOnly = false;
 const modifiers = new Map();
 const focusNavigation = new FocusNavigation({
   currentView: () => $('.view.active')?.id.replace('view-', ''),
   interactionActive: () => gestures.points.size > 0 || gestures.dragging,
   navigate: (name, options) => navigate(name, options),
-  showKeyboardHint: password => {
-    $('#keyboard-context').textContent = password ? 'Password field selected on your PC.' : 'Text field selected on your PC.';
+  showKeyboardHint: (password, state) => {
+    if (state?.revision !== liveFieldRevision) { resetLive(); liveFieldRevision = state?.revision; }
+    $('#keyboard-context').textContent = loginOnly ? 'Windows sign-in. Select the PIN/password field on your PC, then type here.' : password ? 'Password field selected on your PC.' : 'Text field selected on your PC.';
     $('#live-input').classList.toggle('private-input', password);
     $('#live-input').setAttribute('aria-label', password ? 'Type into the selected password field' : 'Type into the selected text field');
   }
@@ -41,7 +43,13 @@ function connect() {
     if (message.type === 'ready') {
       clearTimeout(authTimeout); connected = true; retry = 0; lastPong = Date.now(); status('Connected', true);
       $('#device-name').textContent = message.deviceName; renderApps(message.apps);
+      loginOnly = message.loginOnly === true;
+      document.querySelectorAll('.volume-row, .quick-row [data-shortcut], nav [data-nav="apps"], #text-mode, .system-grid, #shortcuts, .modifier-row').forEach(element => element.hidden = loginOnly);
+      document.querySelectorAll('#special-keys [data-key="F4"], #special-keys [data-key="F5"]').forEach(element => element.hidden = loginOnly);
+      if (loginOnly) { modifiers.clear(); renderModifiers(); $('#text-panel').hidden = true; $('#live-panel').hidden = false; $('#live-mode').classList.add('selected'); $('#text-mode').classList.remove('selected'); navigate('remote', { automatic: true }); }
+      installSetup = message.install; updateInstallButton();
       if ($('#pair-dialog').open) $('#pair-dialog').close();
+      resetLive(); liveFieldRevision = null;
       focusNavigation.reset(); focusNavigation.receive(message.inputFocus);
       heartbeat = setInterval(() => { if (Date.now() - lastPong > 30_000) current.close(); else send({ type: 'ping' }); }, 10_000);
     } else if (message.type === 'input_focus') { if (!document.hidden) focusNavigation.receive(message.state); }
@@ -111,7 +119,14 @@ function navigate(name, { automatic = false } = {}) {
   window.scrollTo(0, 0); haptic();
 }
 function consumeModifiers() { const active = [...modifiers.keys()]; for (const [name, state] of modifiers) if (state === 1) modifiers.delete(name); renderModifiers(); return active; }
-function key(key, mods) { send({ type: 'key', key, modifiers: mods ?? consumeModifiers() }); haptic(); }
+function key(key, mods) {
+  const active = mods ?? consumeModifiers();
+  if (!active.length && $('#view-keyboard').classList.contains('active') && !$('#live-panel').hidden && ['BACKSPACE','DELETE','SPACE','ENTER'].includes(key)) {
+    liveKey(key); haptic(); return;
+  }
+  if (send({ type: 'key', key, modifiers: active }) && !['ESCAPE'].includes(key)) resetLive();
+  haptic();
+}
 function shortcut(value) { const parts = value.split('+'); key(parts.pop(), parts); }
 function renderModifiers() { document.querySelectorAll('[data-mod]').forEach(button => { const state = modifiers.get(button.dataset.mod); button.classList.toggle('once', state === 1); button.classList.toggle('locked', state === 2); button.setAttribute('aria-pressed', state ? 'true' : 'false'); }); }
 document.addEventListener('click', async event => {
@@ -140,24 +155,50 @@ for (const [value, label] of [['CTRL+C','Copy'],['CTRL+V','Paste'],['CTRL+X','Cu
 }
 const live = $('#live-input');
 const sentinel = '\u200B';
-function resetLive() { live.value = sentinel; live.setSelectionRange(1, 1); }
-function typeText(value) {
-  if (!value) return;
-  if (modifiers.size) {
-    if (/^[a-z0-9]$/i.test(value)) key(value.toUpperCase());
-    else { toast('Use the special keys or shortcuts with modifiers.'); consumeModifiers(); }
-  } else send({ type: 'text', value });
+const liveTyping = new LiveTyping(send);
+let liveFieldRevision = null;
+function resetLive() { composing = false; liveTyping.reset(); live.value = sentinel; live.setSelectionRange(1, 1); }
+function localLive() {
+  const offset = live.value.startsWith(sentinel) ? 1 : 0;
+  return { value: live.value.slice(offset), start: Math.max(0, live.selectionStart - offset), end: Math.max(0, live.selectionEnd - offset) };
 }
-live.addEventListener('focus', resetLive);
+function showLive(value, start = value.length, end = start) {
+  live.value = value || sentinel; live.setSelectionRange(value ? start : 1, value ? end : 1);
+}
+function syncLive() {
+  const { value, start, end } = localLive();
+  if (liveTyping.update(value, end)) showLive(value, start, end);
+  else { showLive(liveTyping.value); if (liveTyping.error) toast(liveTyping.error); }
+}
+function liveKey(name) {
+  if (composing) return;
+  const local = localLive();
+  let start = local.start, end = local.end, insert = name === 'SPACE' ? ' ' : name === 'ENTER' ? '\n' : '';
+  if (name === 'BACKSPACE' && start === end && start > 0) start -= liveTyping.parts(local.value.slice(0, start)).at(-1).length;
+  if (name === 'DELETE' && start === end && end < local.value.length) end += liveTyping.parts(local.value.slice(end))[0].length;
+  if (start === end && !insert) { send({ type: 'key', key: name, modifiers: [] }); return; }
+  const value = local.value.slice(0, start) + insert + local.value.slice(end);
+  if (liveTyping.update(value, start + insert.length)) showLive(value, start + insert.length);
+}
+live.addEventListener('focus', () => { if (!live.value) showLive(liveTyping.value); });
 live.addEventListener('compositionstart', () => composing = true);
-live.addEventListener('compositionend', () => { composing = false; typeText(live.value.replaceAll(sentinel, '')); resetLive(); });
+live.addEventListener('compositionend', () => { composing = false; syncLive(); });
 live.addEventListener('beforeinput', event => {
   if (composing || event.isComposing) return;
-  if (event.inputType.startsWith('delete')) { event.preventDefault(); key(event.inputType.includes('Forward') ? 'DELETE' : 'BACKSPACE'); resetLive(); }
-  if (event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph') { event.preventDefault(); key('ENTER'); resetLive(); }
+  if (modifiers.size && event.inputType.startsWith('insert')) {
+    event.preventDefault();
+    if (/^[a-z0-9]$/i.test(event.data || '')) key(event.data.toUpperCase());
+    else { toast('Use the special keys or shortcuts with modifiers.'); consumeModifiers(); }
+    return;
+  }
+  const local = localLive();
+  if (event.inputType.startsWith('delete') && !local.value) {
+    event.preventDefault(); send({ type: 'key', key: event.inputType.includes('Forward') ? 'DELETE' : 'BACKSPACE', modifiers: [] });
+  }
+  if (event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph') { event.preventDefault(); liveKey('ENTER'); }
 });
-live.addEventListener('input', event => { if (!composing && !event.isComposing) { typeText(live.value.replaceAll(sentinel, '')); resetLive(); } });
-live.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); key('ENTER'); } });
+live.addEventListener('input', event => { if (!composing && !event.isComposing) syncLive(); });
+live.addEventListener('keydown', event => { if (event.key === 'Enter' && !composing && !event.isComposing) { event.preventDefault(); liveKey('ENTER'); } });
 $('#live-mode').onclick = () => { $('#text-panel').hidden = true; $('#live-panel').hidden = false; $('#live-mode').classList.add('selected'); $('#text-mode').classList.remove('selected'); live.focus(); };
 $('#text-mode').onclick = () => { $('#text-panel').hidden = false; $('#live-panel').hidden = true; $('#text-mode').classList.add('selected'); $('#live-mode').classList.remove('selected'); $('#text-input').focus(); };
 $('#send-text').onclick = () => { const value = $('#text-input').value; if (value && send({ type: 'text', value })) { $('#text-input').value = ''; toast('Sent to your PC.'); haptic(); } };
@@ -202,6 +243,32 @@ try { sensitivity(localStorage.getItem('tvremote-sensitivity') || '1'); } catch 
 $('#sensitivity-button').onclick = () => { navigate('system'); $('#sensitivity').focus(); };
 $('#connection').onclick = () => { if (!connected && token) { socket?.close(); connect(); } else toast(connected ? 'Connected directly to your Windows PC.' : 'Open TV Remote on your PC to see a pairing code.'); };
 $('#pair-security').textContent = location.protocol === 'https:' ? 'Encrypted local connection. Your pairing stays on this phone.' : 'HTTP is unencrypted. Enable local HTTPS in the PC tray app for protected input and full PWA installation.';
-$('#install-hint').textContent = isSecureContext ? 'Install from your browser menu: Add to Home Screen or Install app.' : 'For full home-screen installation, enable HTTPS on your PC and trust its local certificate on this phone.';
+let installPrompt = null, installSetup = null;
+function installedOnAndroid() { return window.matchMedia('(display-mode: standalone)').matches; }
+function updateInstallButton() {
+  $('#install-android').hidden = installedOnAndroid();
+  $('#install-hint').textContent = installedOnAndroid() ? 'Installed Android app.' : 'Install TV Remote on Android for its own icon and full-screen window.';
+}
+window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); installPrompt = event; updateInstallButton(); });
+window.addEventListener('appinstalled', () => { installPrompt = null; updateInstallButton(); toast('TV Remote installed. Open it from your Android home screen.'); });
+$('#install-android').onclick = async () => {
+  if (installPrompt && isSecureContext && location.protocol === 'https:') {
+    const prompt = installPrompt; installPrompt = null;
+    try { await prompt.prompt(); await prompt.userChoice; } catch { }
+    updateInstallButton(); return;
+  }
+  const secure = isSecureContext && location.protocol === 'https:';
+  $('#install-http-steps').hidden = secure;
+  $('#install-secure-steps').hidden = !secure;
+  const setup = installSetup;
+  const url = new URL(location.href); url.protocol = 'https:'; url.port = String(setup?.httpsPort || 8124); url.pathname = '/'; url.search = url.hash = '';
+  $('#install-open-https').href = url.href;
+  $('#install-open-https').hidden = secure || !setup?.httpsEnabled;
+  $('#install-certificate').hidden = secure || !setup?.certificateFingerprint;
+  $('#install-fingerprint').textContent = setup?.certificateFingerprint ? `Certificate SHA-256: ${setup.certificateFingerprint}` : '';
+  $('#install-fingerprint').hidden = secure || !setup?.certificateFingerprint;
+  $('#install-dialog').showModal();
+};
+updateInstallButton();
 if ('serviceWorker' in navigator && isSecureContext) navigator.serviceWorker.register('/service-worker.js').catch(() => toast('Home-screen cache could not be enabled. The remote still works online.'));
 connect();

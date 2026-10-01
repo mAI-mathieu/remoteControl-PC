@@ -43,7 +43,7 @@ public sealed class PairingService(IConfigStore store, TimeProvider clock) : IPa
             lock (store.Current) if (store.Current.PairedDevices.Count >= 32) return null;
             var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
             var hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
-            var device = new PairedDevice { Name = name.Trim(), ProtectedTokenHash = Convert.ToBase64String(ProtectedData.Protect(hash, null, DataProtectionScope.CurrentUser)) };
+            var device = new PairedDevice { Name = name.Trim(), ProtectedTokenHash = Convert.ToBase64String(ProtectedData.Protect(hash, null, store.ProtectionScope)) };
             lock (store.Current)
             {
                 store.Current.PairedDevices.Add(device);
@@ -64,7 +64,7 @@ public sealed class PairingService(IConfigStore store, TimeProvider clock) : IPa
             {
                 try
                 {
-                    var storedHash = hashes.GetOrAdd(device.ProtectedTokenHash, value => ProtectedData.Unprotect(Convert.FromBase64String(value), null, DataProtectionScope.CurrentUser));
+                    var storedHash = hashes.GetOrAdd(device.ProtectedTokenHash, value => ProtectedData.Unprotect(Convert.FromBase64String(value), null, store.ProtectionScope));
                     if (CryptographicOperations.FixedTimeEquals(hash, storedHash)) return device;
                 }
                 catch (Exception ex) when (ex is CryptographicException or FormatException) { }

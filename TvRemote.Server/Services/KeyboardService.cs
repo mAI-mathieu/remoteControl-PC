@@ -1,5 +1,5 @@
 namespace TvRemote.Services;
-public interface IKeyboardService { void Press(string key, IReadOnlyList<string> modifiers); void Text(string value); }
+public interface IKeyboardService { void Press(string key, IReadOnlyList<string> modifiers); void Text(string value); void Edit(int before, int remove, string value, int after); }
 public sealed class KeyboardService(IInputService input) : IKeyboardService
 {
     public static readonly IReadOnlyDictionary<string, ushort> Keys = new Dictionary<string, ushort>
@@ -27,5 +27,18 @@ public sealed class KeyboardService(IInputService input) : IKeyboardService
         // UTF-16 code units preserve accents and surrogate pairs (emoji support depends on the target app).
         foreach (var chunk in value.Chunk(128))
             input.BatchKeys(chunk.SelectMany(c => new[] { ((ushort)c, false, true), ((ushort)c, true, true) }));
+    }
+    public void Edit(int before, int remove, string value, int after)
+    {
+        void Repeat(ushort key, int count)
+        {
+            foreach (var chunk in Enumerable.Range(0, count).Chunk(128))
+                input.BatchKeys(chunk.SelectMany(_ => new[] { (key, false, false), (key, true, false) }));
+        }
+        void Move(int delta) => Repeat(Keys[delta < 0 ? "LEFT" : "RIGHT"], Math.Abs(delta));
+        Move(before); Repeat(Keys["BACKSPACE"], remove);
+        var lines = value.Split('\n');
+        for (var i = 0; i < lines.Length; i++) { if (i > 0) Press("ENTER", []); Text(lines[i]); }
+        Move(after);
     }
 }

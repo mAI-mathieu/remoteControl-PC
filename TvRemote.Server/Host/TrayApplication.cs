@@ -35,12 +35,13 @@ public sealed class TrayApplication : ApplicationContext
         layout.Controls.Add(new Label { Text = "TV Remote", Font = new("Segoe UI", 22, FontStyle.Bold), AutoSize = true });
         layout.Controls.Add(status); layout.Controls.Add(qr); layout.Controls.Add(code);
         layout.Controls.Add(Button("Manage apps…", ManageApps));
+        layout.Controls.Add(Button("Android app install…", () => _ = AndroidInstallAsync()));
         newCode = Button("Generate new pairing code", () => { server.Pairing.GenerateCode(); RefreshStatus(); }); layout.Controls.Add(newCode);
         layout.Controls.Add(new Label { Text = "Paired phones — select a device to revoke", AutoSize = true });
         devices.Columns.Add("Device", 240); devices.Columns.Add("Status", 100); devices.Columns.Add("Last connected", 260);
         layout.Controls.Add(devices);
         layout.Controls.Add(Button("Revoke selected device", () => { foreach (ListViewItem item in devices.SelectedItems) server.Pairing.Revoke((string)item.Tag!); RefreshStatus(); }));
-        var auto = new CheckBox { Text = "Start with Windows", Checked = store.Current.StartWithWindows, AutoSize = true };
+        var auto = new CheckBox { Text = "Start with Windows (after sign-in)", Checked = store.Current.StartWithWindows, AutoSize = true };
         autostart = auto;
         if (store.Current.StartWithWindows) SetAutostart(true);
         auto.CheckedChanged += (_, _) =>
@@ -49,6 +50,16 @@ public sealed class TrayApplication : ApplicationContext
             catch (Exception ex) { MessageBox.Show(window, ex.Message, "Autostart failed"); }
         };
         layout.Controls.Add(auto);
+        layout.Controls.Add(Button("Windows sign-in setup…", () =>
+        {
+            try { PreLoginSetup.LaunchInstaller(store); }
+            catch (Exception ex) { MessageBox.Show(window, ex.Message, "Windows sign-in setup"); }
+        }));
+        layout.Controls.Add(Button("Remove Windows sign-in service…", () =>
+        {
+            try { if (PreLoginSetup.Installed) PreLoginSetup.LaunchRemoval(); }
+            catch (Exception ex) { MessageBox.Show(window, ex.Message, "Windows sign-in removal"); }
+        }));
         restart = Button("Restart server / reload configuration", () => _ = RestartAsync(true)); layout.Controls.Add(restart);
         layout.Controls.Add(Button("Open configuration", () => Process.Start(new ProcessStartInfo("notepad.exe", store.FilePath) { UseShellExecute = true })));
         layout.Controls.Add(Button("Enable local HTTPS / create certificate", () => _ = EnableHttpsAsync()));
@@ -57,6 +68,7 @@ public sealed class TrayApplication : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open TV Remote", null, (_, _) => Show());
         menu.Items.Add("Manage apps…", null, (_, _) => ManageApps());
+        menu.Items.Add("Android app install…", null, (_, _) => _ = AndroidInstallAsync());
         menu.Items.Add("Generate pairing code", null, (_, _) => { if (newCode.Enabled) { server.Pairing.GenerateCode(); Show(); } });
         menu.Items.Add("Restart server", null, (_, _) => _ = RestartAsync(true));
         menu.Items.Add("Quit", null, (_, _) => _ = QuitAsync());
@@ -96,7 +108,12 @@ public sealed class TrayApplication : ApplicationContext
                 store.Current.StartWithWindows = updated.StartWithWindows;
                 autostart.Checked = updated.StartWithWindows;
             }
-            await server.StartAsync(); newCode.Enabled = true;
+            for (var attempt = 0; ; attempt++)
+            {
+                try { await server.StartAsync(); break; }
+                catch (IOException) when (PreLoginSetup.Installed && attempt < 5) { await Task.Delay(1000); }
+            }
+            newCode.Enabled = true;
             tray.Text = "TV Remote — running";
         }
         catch (Exception ex)
@@ -146,6 +163,18 @@ public sealed class TrayApplication : ApplicationContext
             MessageBox.Show(window, "Local HTTPS enabled. Install TV-Remote-Root.cer from the configuration folder on your phone, verify its SHA-256 fingerprint locally, and enable trust. Then open the HTTPS LAN address. See README for platform instructions.", "HTTPS setup");
         }
         catch (Exception ex) { MessageBox.Show(window, ex.Message, "HTTPS setup failed"); }
+    }
+    private async Task AndroidInstallAsync()
+    {
+        try
+        {
+            if (!store.Current.EnableHttps) await EnableHttpsAsync();
+            if (!store.Current.EnableHttps) return;
+            var rootPath = Path.Combine(store.DirectoryPath, "TV-Remote-Root.cer");
+            var fingerprint = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(rootPath)));
+            MessageBox.Show(window, "1. Transfer TV-Remote-Root.cer from the configuration folder to your Android phone.\n\n2. Verify this certificate SHA-256 fingerprint before installing it as a CA certificate in Android settings:\n" + fingerprint + "\n\n3. Open this encrypted address in Android Chrome:\n" + string.Join("\n", discovery.Urls(store.Current.HttpsPort, true)) + "\n\n4. Pair again on HTTPS, then choose Install on Android in System (or Chrome menu → Install app / Add to Home screen → Install).", "Install TV Remote on Android");
+        }
+        catch (Exception ex) { MessageBox.Show(window, ex.Message, "Android installation setup failed"); }
     }
     private void NetworkChanged(object? sender, EventArgs e) { if (!quitting) networkTimer.Change(1000, Timeout.Infinite); }
     private static void SetAutostart(bool enabled)

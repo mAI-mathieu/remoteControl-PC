@@ -10,10 +10,9 @@ export class FocusNavigation {
     if (this.interactionActive()) { this.pending = state; return; }
     this.revision = state.revision;
     const view = this.currentView();
-    if (state.editable && (view === 'remote' || this.autoOpened && view === 'keyboard')) {
-      this.autoOpened = true;
-      this.showKeyboardHint(state.password === true);
-      if (view !== 'keyboard') this.navigate('keyboard', { automatic: true });
+    if (state.editable && (view === 'remote' || view === 'keyboard')) {
+      this.showKeyboardHint(state.password === true, state);
+      if (view !== 'keyboard') { this.autoOpened = true; this.navigate('keyboard', { automatic: true }); }
     } else if (!state.editable && this.autoOpened && view === 'keyboard') {
       this.autoOpened = false; this.navigate('remote', { automatic: true });
     }

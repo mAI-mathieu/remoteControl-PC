@@ -18,13 +18,13 @@ public sealed class ServerRuntime(ConfigStore store, DiscoveryService discovery)
         if (app != null) await StopAsync();
         var addresses = bindAddresses ?? discovery.Addresses().Append(IPAddress.Loopback).Distinct().ToArray();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [], ContentRootPath = AppContext.BaseDirectory, WebRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot") });
-        builder.Logging.ClearProviders(); builder.Logging.AddProvider(new FileLoggerProvider(store.DirectoryPath));
+        builder.Logging.ClearProviders(); builder.Logging.AddProvider(new FileLoggerProvider(store.LoginOnly && bindAddresses == null ? PreLoginSetup.DataDirectory : store.DirectoryPath));
         builder.WebHost.ConfigureKestrel(options =>
         {
             options.Limits.MaxRequestBodySize = 2048;
             options.Limits.MaxConcurrentConnections = 64;
             options.Limits.MaxConcurrentUpgradedConnections = 16;
-            foreach (var address in addresses) options.Listen(address, store.Current.ServerPort);
+            if (!store.LoginOnly) foreach (var address in addresses) options.Listen(address, store.Current.ServerPort);
             if (store.Current.EnableHttps)
             {
                 var certificate = new LocalCertificateService(store, discovery).Load();
@@ -42,7 +42,7 @@ public sealed class ServerRuntime(ConfigStore store, DiscoveryService discovery)
         builder.Services.AddSingleton<RemoteWebSocketHandler>();
         builder.Services.AddSingleton<TextFocusService>();
         builder.Services.AddSingleton<ITextFocusService>(p => p.GetRequiredService<TextFocusService>());
-        if (bindAddresses == null) builder.Services.AddHostedService(p => p.GetRequiredService<TextFocusService>());
+        if (bindAddresses == null && !store.LoginOnly) builder.Services.AddHostedService(p => p.GetRequiredService<TextFocusService>());
         builder.Services.AddSingleton(discovery);
         builder.Services.AddSingleton<MdnsService>();
         if (bindAddresses == null) builder.Services.AddHostedService(p => p.GetRequiredService<MdnsService>());
@@ -59,6 +59,7 @@ public sealed class ServerRuntime(ConfigStore store, DiscoveryService discovery)
         server.Use(async (context, next) =>
         {
             var remote = context.Connection.RemoteIpAddress;
+            if (store.LoginOnly && !context.Request.IsHttps) { context.Response.StatusCode = 403; return; }
             var host = context.Request.Host.Host.Trim('[', ']');
             if (remote == null || !DiscoveryService.IsLan(remote) || !allowedHosts.Contains(host)) { context.Response.StatusCode = 403; return; }
             if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path == "/ws")
@@ -81,6 +82,7 @@ public sealed class ServerRuntime(ConfigStore store, DiscoveryService discovery)
         Pairing.GenerateCode();
         server.MapPost("/api/pair", async (HttpContext context) =>
         {
+            if (store.LoginOnly) return Results.Json(new { message = "Pair your phone in TV Remote after signing in on the PC." }, statusCode: 403);
             try
             {
                 if (!context.Request.HasJsonContentType()) return Results.BadRequest(new { message = "Expected JSON." });
@@ -100,7 +102,7 @@ public sealed class ServerRuntime(ConfigStore store, DiscoveryService discovery)
             var png = apps.GetIcon(id);
             return png == null ? Results.NotFound() : Results.File(png, "image/png");
         });
-        server.MapGet("/TV-Remote-Root.cer", () => File.Exists(Path.Combine(store.DirectoryPath, "TV-Remote-Root.cer"))
+        if (!store.LoginOnly) server.MapGet("/TV-Remote-Root.cer", () => File.Exists(Path.Combine(store.DirectoryPath, "TV-Remote-Root.cer"))
             ? Results.File(Path.Combine(store.DirectoryPath, "TV-Remote-Root.cer"), "application/x-x509-ca-cert", "TV-Remote-Root.cer") : Results.NotFound());
         server.UseDefaultFiles(); server.UseStaticFiles();
         try

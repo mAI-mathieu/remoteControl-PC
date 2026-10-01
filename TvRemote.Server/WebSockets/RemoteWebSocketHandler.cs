@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text.Json;
+using System.Security.Cryptography;
 using System.Threading.Channels;
 using TvRemote.Configuration;
 using TvRemote.Models;
@@ -96,7 +97,14 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
             lock (store.Current) { device.LastConnected = DateTimeOffset.UtcNow; store.Save(); }
             logger.LogInformation("Device {DeviceId} connected", device.Id);
             focus.Changed += onFocus; AppsChanged += onApps; subscribed = true;
-            await Reply(new { type = "ready", deviceName = store.Current.DeviceName, apps = apps.List(), inputFocus = focus.Current });
+            string? certificateFingerprint = null;
+            if (store is ConfigStore disk && !store.LoginOnly)
+            {
+                var rootPath = Path.Combine(disk.DirectoryPath, "TV-Remote-Root.cer");
+                if (File.Exists(rootPath)) certificateFingerprint = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(rootPath)));
+            }
+            await Reply(new { type = "ready", deviceName = store.Current.DeviceName, loginOnly = store.LoginOnly, apps = apps.List(), inputFocus = focus.Current,
+                install = new { httpsEnabled = store.Current.EnableHttps, httpsPort = store.Current.HttpsPort, certificateFingerprint } });
             focusPump = PumpFocus(); appPump = PumpApps(); focus.RequestRefresh();
             var window = Environment.TickCount64; int count = 0, errors = 0, textCharacters = 0, launches = 0;
             while (socket.State == WebSocketState.Open)
@@ -112,6 +120,7 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
                 {
                     var command = CommandParser.Parse(data);
                     if (command.Type == "text" && (textCharacters += command.Value!.Length) > 20_000) throw new FormatException("Text rate exceeded.");
+                    if (command.Type == "text_edit" && (textCharacters += Math.Abs(command.Before) + command.Remove + command.Value!.Length + Math.Abs(command.After)) > 20_000) throw new FormatException("Text edit rate exceeded.");
                     if (command.Type is "app" or "power" or "playnite_close" && ++launches > 4) throw new FormatException("Action rate exceeded.");
                     dispatcher.Execute(sessionId, command);
                     if (command.Type is "mouse_click" or "mouse_up" or "app" || command.Type == "key" && command.Key is "TAB" or "ENTER" or "ESCAPE") focus.RequestRefresh();
@@ -134,6 +143,7 @@ public sealed class RemoteWebSocketHandler(PairingService pairing, IConfigStore 
             if (subscribed) { focus.Changed -= onFocus; AppsChanged -= onApps; }
             updates.Writer.TryComplete(); appUpdates.Writer.TryComplete(); sessionStop.Cancel(); await Task.WhenAll(focusPump, appPump);
             dispatcher.Release(sessionId); sessions.TryRemove(sessionId, out _); slots.Release();
+            if (socket.State == WebSocketState.CloseReceived) { try { using var timeout = new CancellationTokenSource(1000); await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Closed", timeout.Token); } catch { socket.Abort(); } }
             if (socket.State == WebSocketState.Open) { try { using var timeout = new CancellationTokenSource(1000); await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Session ended", timeout.Token); } catch { socket.Abort(); } }
         }
     }

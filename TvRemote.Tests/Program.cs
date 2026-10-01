@@ -28,6 +28,8 @@ try
     Reject(JsonSerializer.Serialize(new { type = "text", value = new string('x', 10001) }));
     Reject("{\"type\":\"text\",\"value\":\"\\uD800\"}");
     Check(CommandParser.Parse("{\"type\":\"power\",\"action\":\"shutdown\",\"confirm\":true}"u8).Confirm, "explicit power confirmation");
+    Check(CommandParser.Parse("{\"type\":\"text_edit\",\"before\":-2,\"remove\":2,\"value\":\"he\",\"after\":0}"u8).Remove == 2, "bounded live text editing schema");
+    foreach (var invalidEdit in new[] { "{\"type\":\"text_edit\",\"before\":0,\"remove\":-1,\"value\":\"\",\"after\":0}", "{\"type\":\"text_edit\",\"before\":0,\"remove\":0,\"value\":\"\",\"after\":0}", "{\"type\":\"text_edit\",\"before\":10000,\"remove\":1,\"value\":\"\",\"after\":0}", "{\"type\":\"text_edit\",\"before\":0,\"remove\":1,\"value\":\"\\uD800\",\"after\":0}" }) Reject(invalidEdit);
     var store = new ConfigStore(temp); store.Current.DeviceName = "Test PC"; store.Save();
     Check(new ConfigStore(temp).Current.DeviceName == "Test PC", "configuration round trip");
     var clock = new TestClock(); var pairing = new PairingService(store, clock);
@@ -96,6 +98,8 @@ try
     var input = new FakeInput(); var keyboard = new KeyboardService(input);
     keyboard.Text("č🛋"); Check(input.Events.Count == 6 && input.Events.All(e => e.Unicode), "UTF-16 Unicode injection");
     input.Events.Clear(); keyboard.Press("C", ["CTRL"]); Check(input.Events.Select(e => (e.Key,e.Up)).SequenceEqual(new[] { ((ushort)17,false),((ushort)67,false),((ushort)67,true),((ushort)17,true) }), "shortcut modifiers released in order");
+    input.Events.Clear(); keyboard.Edit(-1, 1, "é\n", 1);
+    Check(input.Events.Select(e => (e.Key,e.Up,e.Unicode)).SequenceEqual(new[] { ((ushort)0x25,false,false),((ushort)0x25,true,false),((ushort)8,false,false),((ushort)8,true,false),((ushort)'é',false,true),((ushort)'é',true,true),((ushort)13,false,false),((ushort)13,true,false),((ushort)0x27,false,false),((ushort)0x27,true,false) }), "live correction moves caret, removes text, inserts Unicode and presses Enter in order");
     var mouse = new FakeMouse(); using var dispatcher = new CommandDispatcher(mouse, keyboard, new VolumeService(input), new FakeApps(), new FakePower());
     Reject("{\"type\":\"media\",\"action\":\"play_pause\"}");
     dispatcher.Execute("one", new("mouse_down", Button:"left"));
@@ -141,6 +145,7 @@ try
         var appJson = readyJson.RootElement.GetProperty("apps")[0];
         Check(appJson.GetProperty("id").GetString() == "test" && appJson.GetProperty("name").GetString() == "Test app", "camelCase app contract for browser");
         Check(!readyJson.RootElement.GetProperty("inputFocus").GetProperty("editable").GetBoolean(), "initial input focus included in authenticated handshake");
+        Check(readyJson.RootElement.GetProperty("install").GetProperty("httpsPort").GetInt32() == store.Current.HttpsPort, "Android install setup includes the configured HTTPS port");
     }
     socketApps.Apps = [new { id = "updated", name = "Edited from PC", icon = "globe", available = true }];
     server.Handler!.NotifyAppsChanged();
@@ -157,6 +162,8 @@ try
     input.Events.Clear(); await WsSend(ws, new { type = "volume", action = "up" }); await WsSend(ws, new { type = "ping" });
     Check((await WsReceive(ws)).Contains("pong") && input.Events.Select(e => (e.Key,e.Up)).SequenceEqual(new[] { ((ushort)0xAF,false),((ushort)0xAF,true) }), "main-page volume command reaches Windows volume key service");
     input.Events.Clear(); await WsSend(ws, new { type = "text", value = "Red Dead Redemption 2" }); await WsSend(ws, new { type = "ping" }); Check((await WsReceive(ws)).Contains("pong") && input.Events.Count == 42, "Unicode input reaches injected service through WebSocket");
+    input.Events.Clear(); await WsSend(ws, new { type = "text_edit", before = 0, remove = 2, value = "he", after = 0 }); await WsSend(ws, new { type = "ping" });
+    Check((await WsReceive(ws)).Contains("pong") && input.Events.Count == 8 && input.Events.Take(4).All(e => e.Key == 8 && !e.Unicode) && input.Events.Skip(4).All(e => e.Unicode), "phone text corrections reach the PC through authenticated WebSocket");
     await WsSend(ws, new { type = "shell", command = "echo no" }); Check((await WsReceive(ws)).Contains("error"), "malformed command rejected on live socket");
     server.Pairing.Revoke(server.Pairing.Authenticate(token)!.Id);
     var revokedIcon = new HttpRequestMessage(HttpMethod.Post, origin + "/api/app-icon/test"); revokedIcon.Headers.Add("Origin", origin); revokedIcon.Headers.Authorization = new("Bearer", token);
@@ -167,6 +174,43 @@ try
     var certificates = X509CertificateLoader.LoadPkcs12Collection(ProtectedData.Unprotect(File.ReadAllBytes(cert.PfxPath),null,DataProtectionScope.CurrentUser),null);
     Check(certificates.Count == 2 && certificates.Count(c => c.HasPrivateKey) == 1, "root signing private key is discarded");
     foreach (var item in certificates) item.Dispose();
+    var loginDirectory = Path.Combine(temp, "sign-in"); Directory.CreateDirectory(loginDirectory);
+    store.Current.EnableHttps = true; code = pairing.GenerateCode(); var loginToken = pairing.Pair(code.Code, "Sign-in phone")!;
+    PreLoginSetup.Export(store, loginDirectory);
+    var loginStore = new ConfigStore(loginDirectory, DataProtectionScope.LocalMachine, loginOnly: true);
+    Check(new PairingService(loginStore, clock).Authenticate(loginToken) != null && loginStore.Current.AppShortcuts.Count == 0, "sign-in snapshot preserves existing phone tokens with machine DPAPI and omits app launch paths");
+    var snapshotBytes = File.ReadAllBytes(loginStore.FilePath); loginStore.Current.DeviceName = "Not written"; loginStore.Save();
+    Check(File.ReadAllBytes(loginStore.FilePath).SequenceEqual(snapshotBytes), "service never overwrites the owner's pairing/revocation snapshot");
+    Check(PreLoginService.Allowed(new("text", Value: "example")) && PreLoginService.Allowed(new("key", Key: "TAB", Modifiers: [])) && PreLoginService.Allowed(new("text_edit", Remove: 1, Value: "")), "sign-in allows credential entry and navigation");
+    Check(!PreLoginService.Allowed(new("app", Id: "explorer")) && !PreLoginService.Allowed(new("power", Action: "shutdown", Confirm: true)) && !PreLoginService.Allowed(new("key", Key: "D", Modifiers: ["WIN"])) && !PreLoginService.Allowed(new("volume", Action: "up")), "sign-in rejects app launch, power, volume and Windows shortcuts");
+    Check(SignInInput.Valid(new("keys", Keys: [new(0x0D, false, false), new('č', false, true)])) && !SignInInput.Valid(new("keys", Keys: [new(0x5B, false, false)])) && !SignInInput.Valid(new("mouse", int.MinValue, 0, 1)) && !SignInInput.Valid(new("keys", Keys: new SignInStroke[257])), "protected desktop helper independently bounds input and rejects Windows keys");
+    var loginMouse = new FakeMouse();
+    using (var loginDispatcher = new CommandDispatcher(loginMouse, new KeyboardService(input), new VolumeService(input), new FakeApps(), new FakePower(), loginStore))
+    {
+        try { loginDispatcher.Execute("test", new("app", Id: "test")); throw new Exception("Sign-in launched app"); } catch (InvalidOperationException) { passed++; }
+        loginDispatcher.Execute("test", new("mouse_down", Button: "left")); loginDispatcher.Release("test");
+        Check(!loginMouse.Down, "sign-in disconnect releases a trackpad drag");
+    }
+    var loginListener = new TcpListener(IPAddress.Loopback, 0); loginListener.Start(); loginStore.Current.HttpsPort = ((IPEndPoint)loginListener.LocalEndpoint).Port; loginListener.Stop();
+    var loginOrigin = $"https://127.0.0.1:{loginStore.Current.HttpsPort}";
+    using var loginCert = new LocalCertificateService(loginStore, new DiscoveryService()).Load();
+    using var loginHttp = new HttpClient(new HttpClientHandler { ServerCertificateCustomValidationCallback = (_, peer, _, _) => peer?.Thumbprint == loginCert.Thumbprint });
+    await using (var loginServer = new ServerRuntime(loginStore, new DiscoveryService()))
+    {
+        await loginServer.StartAsync([IPAddress.Loopback], services => { services.AddSingleton<IInputService>(input); services.AddSingleton<ITextFocusService>(focus); });
+        var forbiddenPair = new HttpRequestMessage(HttpMethod.Post, loginOrigin + "/api/pair"); forbiddenPair.Headers.Add("Origin", loginOrigin); forbiddenPair.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+        Check((await loginHttp.SendAsync(forbiddenPair)).StatusCode == HttpStatusCode.Forbidden && (await loginHttp.GetAsync(loginOrigin + "/TV-Remote-Root.cer")).StatusCode == HttpStatusCode.NotFound, "sign-in TLS server forbids new pairing and public certificate-file reads");
+        using var loginSocket = new ClientWebSocket(); loginSocket.Options.SetRequestHeader("Origin", loginOrigin); loginSocket.Options.RemoteCertificateValidationCallback = (_, peer, _, _) => peer?.GetCertHashString() == loginCert.Thumbprint;
+        await loginSocket.ConnectAsync(new Uri(loginOrigin.Replace("https", "wss") + "/ws"), CancellationToken.None);
+        await WsSend(loginSocket, new { type = "auth", token = loginToken });
+        using var loginReady = JsonDocument.Parse(await WsReceive(loginSocket));
+        Check(loginReady.RootElement.GetProperty("loginOnly").GetBoolean() && loginReady.RootElement.GetProperty("apps").GetArrayLength() == 0, "existing paired phone connects to sign-in TLS endpoint without app launchers");
+        await WsSend(loginSocket, new { type = "key", key = "D", modifiers = new[] { "WIN" } });
+        Check((await WsReceive(loginSocket)).Contains("error"), "privileged sign-in WebSocket rejects Windows shortcuts before injection");
+        input.Events.Clear(); await WsSend(loginSocket, new { type = "text", value = "Example only" }); await WsSend(loginSocket, new { type = "ping" });
+        Check((await WsReceive(loginSocket)).Contains("pong") && input.Events.Count == 24, "sign-in authenticated typing reaches fake input over TLS");
+        await loginSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+    }
     var hostLog = File.ReadAllText(Path.Combine(temp,"host.log"));
     Check(hostLog.Contains("Server started") && hostLog.Contains("Pairing attempt accepted") && !hostLog.Contains(token) && !hostLog.Contains("Red Dead Redemption 2") && !hostLog.Contains("input_focus"), "startup/pairing logging without tokens, typed text or focus details");
     var mdnsPacket = MdnsService.BuildResponse([IPAddress.Parse("192.168.1.50")],8123);

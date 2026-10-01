@@ -12,3 +12,5 @@
 @media(orientation:landscape) and (max-height:360px){#view-remote .click-row{flex-direction:row}#view-remote .click-row button{min-height:44px;min-width:0;font-size:11px;padding:6px}#view-remote .click-row button span{display:none}}
 
 .app-icon img{display:block;width:32px;height:32px;object-fit:contain}.app-icon:has(img){display:grid;place-items:center}
+
+.install-steps{padding-left:22px;font-size:14px;line-height:1.6}.install-steps li{margin:12px 0}#install-dialog a{color:var(--accent)}#install-fingerprint{overflow-wrap:anywhere;font-size:11px}

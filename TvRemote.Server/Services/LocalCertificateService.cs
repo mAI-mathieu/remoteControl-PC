@@ -9,8 +9,8 @@ public sealed class LocalCertificateService(ConfigStore store, DiscoveryService 
     public string PfxPath => Path.Combine(store.DirectoryPath, "server.dpapi");
     public X509Certificate2 Load()
     {
-        if (!File.Exists(PfxPath)) Generate();
-        return X509CertificateLoader.LoadPkcs12(ProtectedData.Unprotect(File.ReadAllBytes(PfxPath), null, DataProtectionScope.CurrentUser), null);
+        if (!File.Exists(PfxPath)) { if (store.LoginOnly) throw new InvalidDataException("Sign-in service requires an existing HTTPS certificate."); Generate(); }
+        return X509CertificateLoader.LoadPkcs12(ProtectedData.Unprotect(File.ReadAllBytes(PfxPath), null, store.ProtectionScope), null);
     }
     public void Generate()
     {
@@ -33,7 +33,7 @@ public sealed class LocalCertificateService(ConfigStore store, DiscoveryService 
         using var server = signed.CopyWithPrivateKey(key);
         using var publicRoot = X509CertificateLoader.LoadCertificate(root.Export(X509ContentType.Cert));
         var chain = new X509Certificate2Collection { server, publicRoot };
-        File.WriteAllBytes(PfxPath, ProtectedData.Protect(chain.Export(X509ContentType.Pfx)!, null, DataProtectionScope.CurrentUser));
+        File.WriteAllBytes(PfxPath, ProtectedData.Protect(chain.Export(X509ContentType.Pfx)!, null, store.ProtectionScope));
         File.WriteAllBytes(RootPath, root.Export(X509ContentType.Cert));
     }
 }

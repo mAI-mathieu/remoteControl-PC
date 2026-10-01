@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Security.Cryptography;
 
 namespace TvRemote.Configuration;
 
@@ -38,15 +39,19 @@ public sealed class PairedDevice
     public DateTimeOffset? LastConnected { get; set; }
 }
 
-public interface IConfigStore { RemoteConfig Current { get; } void Save(); }
+public interface IConfigStore { RemoteConfig Current { get; } DataProtectionScope ProtectionScope => DataProtectionScope.CurrentUser; bool LoginOnly => false; void Save(); }
 public sealed class ConfigStore : IConfigStore
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true, UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
     public string DirectoryPath { get; }
     public string FilePath => System.IO.Path.Combine(DirectoryPath, "config.json");
     public RemoteConfig Current { get; }
-    public ConfigStore(string? directory = null)
+    public DataProtectionScope ProtectionScope { get; }
+    public bool LoginOnly { get; }
+    public ConfigStore(string? directory = null, DataProtectionScope protectionScope = DataProtectionScope.CurrentUser, bool loginOnly = false)
     {
+        ProtectionScope = protectionScope;
+        LoginOnly = loginOnly;
         DirectoryPath = directory ?? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TvRemote");
         Directory.CreateDirectory(DirectoryPath);
         Current = File.Exists(FilePath) ? JsonSerializer.Deserialize<RemoteConfig>(File.ReadAllText(FilePath), Json) ?? throw new InvalidDataException("Empty configuration") : new();
@@ -67,11 +72,13 @@ public sealed class ConfigStore : IConfigStore
     }
     public void Save()
     {
+        if (LoginOnly) return; // Service reads the owner's snapshot; it must never overwrite revocations.
         lock (Current)
         {
             var temp = FilePath + ".tmp";
             File.WriteAllText(temp, JsonSerializer.Serialize(Current, Json));
             File.Move(temp, FilePath, true);
+            if (ProtectionScope == DataProtectionScope.CurrentUser) Host.PreLoginSetup.SyncIfInstalled(this);
         }
     }
 }
